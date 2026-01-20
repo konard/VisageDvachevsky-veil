@@ -91,7 +91,8 @@ std::uint16_t compute_random_padding_size() {
     return kMinPaddingSize;
   }
   const auto random_val = veil::crypto::random_uint64();
-  const auto range = static_cast<std::uint64_t>(kMaxPaddingSize - kMinPaddingSize + 1);
+  const auto range = static_cast<std::uint64_t>(kMaxPaddingSize) -
+                     static_cast<std::uint64_t>(kMinPaddingSize) + 1U;
   return static_cast<std::uint16_t>(kMinPaddingSize + (random_val % range));
 }
 }  // namespace
