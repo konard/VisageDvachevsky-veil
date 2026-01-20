@@ -28,6 +28,8 @@ struct NatConfig {
   std::string internal_interface;
   // Interface to masquerade traffic to (e.g., "eth0").
   std::string external_interface;
+  // VPN subnet in CIDR notation (e.g., "10.8.0.0/24").
+  std::string vpn_subnet{"10.8.0.0/24"};
   // Enable IP forwarding.
   bool enable_forwarding{true};
   // Use iptables MASQUERADE (true) or SNAT (false).
@@ -102,6 +104,15 @@ class RouteManager {
 
   // Execute a command and check for success.
   bool execute_command_check(const std::string& command, std::error_code& ec);
+
+  // Check if a command-line tool is available.
+  bool is_tool_available(const std::string& tool, std::error_code& ec);
+
+  // Check if iptables or nftables is available.
+  bool check_firewall_availability(std::error_code& ec);
+
+  // Log current iptables state for debugging.
+  void log_iptables_state(const std::string& phase);
 
   // Build iptables command for NAT.
   std::string build_nat_command(const NatConfig& config, bool add);

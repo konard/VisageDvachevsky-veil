@@ -66,6 +66,13 @@ bool RouteManager::execute_command_check(const std::string& command, std::error_
 }
 
 bool RouteManager::add_route(const Route& route, std::error_code& ec) {
+  // Check if ip command is available.
+  if (!is_tool_available("ip", ec)) {
+    ec = std::make_error_code(std::errc::no_such_file_or_directory);
+    LOG_ERROR("Cannot add route: ip command not available");
+    return false;
+  }
+
   std::ostringstream cmd;
   cmd << "ip route add " << route.destination;
 
@@ -196,14 +203,59 @@ bool RouteManager::is_ip_forwarding_enabled(std::error_code& ec) {
   return value == 1;
 }
 
+bool RouteManager::is_tool_available(const std::string& tool, std::error_code& ec) {
+  std::ostringstream cmd;
+  cmd << "command -v " << tool << " >/dev/null 2>&1";
+  auto result = execute_command(cmd.str(), ec);
+  // command -v returns 0 if tool exists, non-zero otherwise
+  return result.has_value() && !ec;
+}
+
+bool RouteManager::check_firewall_availability(std::error_code& ec) {
+  // Check for iptables first (most common)
+  if (is_tool_available("iptables", ec)) {
+    LOG_DEBUG("iptables is available");
+    return true;
+  }
+
+  // Check for nftables as fallback
+  if (is_tool_available("nft", ec)) {
+    LOG_WARN("nftables (nft) is available but iptables is not - iptables commands may fail");
+    LOG_WARN("Consider installing iptables-nft or iptables-legacy for compatibility");
+    return false;
+  }
+
+  LOG_ERROR("Neither iptables nor nftables (nft) is available on this system");
+  return false;
+}
+
+void RouteManager::log_iptables_state(const std::string& phase) {
+  std::error_code ec;
+
+  (void)phase;  // Used in LOG_DEBUG which may be compiled out
+  LOG_DEBUG("=== iptables state {} ===", phase);
+
+  // Log NAT table POSTROUTING chain
+  auto nat_result = execute_command("iptables -t nat -L POSTROUTING -n -v 2>&1", ec);
+  if (nat_result) {
+    LOG_DEBUG("NAT POSTROUTING:\n{}", *nat_result);
+  }
+
+  // Log FORWARD chain
+  auto forward_result = execute_command("iptables -L FORWARD -n -v 2>&1", ec);
+  if (forward_result) {
+    LOG_DEBUG("FORWARD chain:\n{}", *forward_result);
+  }
+}
+
 std::string RouteManager::build_nat_command(const NatConfig& config, bool add) {
   std::ostringstream cmd;
   cmd << "iptables -t nat ";
   cmd << (add ? "-A" : "-D");
   cmd << " POSTROUTING -o " << config.external_interface;
 
-  if (!config.internal_interface.empty()) {
-    cmd << " -s 10.8.0.0/24";  // Typical VPN subnet.
+  if (!config.internal_interface.empty() && !config.vpn_subnet.empty()) {
+    cmd << " -s " << config.vpn_subnet;
   }
 
   if (config.use_masquerade) {
@@ -216,36 +268,82 @@ std::string RouteManager::build_nat_command(const NatConfig& config, bool add) {
 }
 
 bool RouteManager::configure_nat(const NatConfig& config, std::error_code& ec) {
-  // Enable IP forwarding first.
-  if (config.enable_forwarding) {
-    if (!set_ip_forwarding(true, ec)) {
-      return false;
-    }
-  }
-
-  // Add iptables MASQUERADE rule.
-  const std::string cmd = build_nat_command(config, true);
-  if (!execute_command_check(cmd, ec)) {
+  // Check if iptables is available before proceeding.
+  if (!check_firewall_availability(ec)) {
+    ec = std::make_error_code(std::errc::no_such_file_or_directory);
+    LOG_ERROR("Cannot configure NAT: iptables not available");
     return false;
   }
 
-  // Also add FORWARD rules for the internal interface.
+  // Log state before modifications.
+  log_iptables_state("before NAT configuration");
+
+  // Track what we've successfully added for rollback if needed.
+  bool forwarding_enabled = false;
+
+  // Enable IP forwarding first.
+  if (config.enable_forwarding) {
+    if (!set_ip_forwarding(true, ec)) {
+      LOG_ERROR("Failed to enable IP forwarding: {}", ec.message());
+      return false;
+    }
+    forwarding_enabled = true;
+  }
+
+  // Add iptables MASQUERADE/SNAT rule.
+  const std::string nat_cmd = build_nat_command(config, true);
+  if (!execute_command_check(nat_cmd, ec)) {
+    LOG_ERROR("Failed to add NAT rule: {}", ec.message());
+    // Rollback IP forwarding if we enabled it.
+    if (forwarding_enabled && forwarding_state_saved_) {
+      std::error_code rollback_ec;
+      set_ip_forwarding(original_forwarding_state_, rollback_ec);
+    }
+    return false;
+  }
+
+  // Add FORWARD rule for incoming traffic.
   std::ostringstream forward_in;
   forward_in << "iptables -A FORWARD -i " << config.internal_interface << " -j ACCEPT";
   if (!execute_command_check(forward_in.str(), ec)) {
-    LOG_WARN("Failed to add FORWARD rule for input: {}", ec.message());
-    // Don't fail, NAT might still work.
+    LOG_ERROR("Failed to add FORWARD rule for input: {}", ec.message());
+    // Rollback: remove NAT rule.
+    std::error_code rollback_ec;
+    const std::string remove_nat_cmd = build_nat_command(config, false);
+    execute_command_check(remove_nat_cmd, rollback_ec);
+    if (forwarding_enabled && forwarding_state_saved_) {
+      set_ip_forwarding(original_forwarding_state_, rollback_ec);
+    }
+    return false;
   }
 
+  // Add FORWARD rule for outgoing traffic.
   std::ostringstream forward_out;
   forward_out << "iptables -A FORWARD -o " << config.internal_interface << " -j ACCEPT";
   if (!execute_command_check(forward_out.str(), ec)) {
-    LOG_WARN("Failed to add FORWARD rule for output: {}", ec.message());
+    LOG_ERROR("Failed to add FORWARD rule for output: {}", ec.message());
+    // Rollback: remove all previously added rules.
+    std::error_code rollback_ec;
+    std::ostringstream remove_forward_in;
+    remove_forward_in << "iptables -D FORWARD -i " << config.internal_interface << " -j ACCEPT";
+    execute_command_check(remove_forward_in.str(), rollback_ec);
+    const std::string remove_nat_cmd = build_nat_command(config, false);
+    execute_command_check(remove_nat_cmd, rollback_ec);
+    if (forwarding_enabled && forwarding_state_saved_) {
+      set_ip_forwarding(original_forwarding_state_, rollback_ec);
+    }
+    return false;
   }
 
+  // All rules added successfully.
   nat_configured_ = true;
   current_nat_config_ = config;
-  LOG_INFO("NAT configured: {} -> {} ({})", config.internal_interface, config.external_interface,
+
+  // Log state after modifications.
+  log_iptables_state("after NAT configuration");
+
+  LOG_INFO("NAT configured: {} -> {} (subnet: {}, mode: {})", config.internal_interface,
+           config.external_interface, config.vpn_subnet,
            config.use_masquerade ? "MASQUERADE" : "SNAT");
   return true;
 }
