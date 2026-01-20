@@ -200,6 +200,9 @@ bool TransportSession::should_rotate_session() {
 void TransportSession::rotate_session() {
   VEIL_DCHECK_THREAD(thread_checker_);
 
+  // Store sequence before rotation for assertion
+  const std::uint64_t sequence_before_rotation = send_sequence_;
+
   current_session_id_ = session_rotator_.rotate(now_fn_());
   packets_since_rotation_ = 0;
   ++stats_.session_rotations;

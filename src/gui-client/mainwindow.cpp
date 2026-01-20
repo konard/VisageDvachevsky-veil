@@ -56,7 +56,7 @@ void MainWindow::setupMenuBar() {
   viewMenu->addAction(tr("&Diagnostics"), this, &MainWindow::showDiagnosticsView);
 
   auto* helpMenu = menuBar()->addMenu(tr("&Help"));
-  helpMenu->addAction(tr("&About"), [this]() {
+  helpMenu->addAction(tr("&About"), []() {
     // TODO: Show about dialog
   });
 }
