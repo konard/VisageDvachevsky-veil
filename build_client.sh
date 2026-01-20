@@ -222,6 +222,7 @@ configure_cmake() {
     local cmake_opts=(
         "-DCMAKE_BUILD_TYPE=${BUILD_TYPE^}"  # Capitalize first letter
         "-DVEIL_BUILD_TESTS=OFF"
+        "-DVEIL_BUILD_SERVER=OFF"  # Don't build server when building client
         "-GNinja"
     )
 

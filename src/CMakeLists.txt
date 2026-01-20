@@ -69,23 +69,29 @@ install(TARGETS veil-client
   RUNTIME DESTINATION bin
 )
 
-# Server executable.
-add_executable(veil-server
-  server/main.cpp
-  server/server_config.cpp
-)
+# Server executable (optional).
+option(VEIL_BUILD_SERVER "Build server executable" ON)
 
-target_link_libraries(veil-server PRIVATE veil_common)
-veil_set_warnings(veil-server)
+if(VEIL_BUILD_SERVER)
+  add_executable(veil-server
+    server/main.cpp
+    server/server_config.cpp
+  )
 
-install(TARGETS veil-server
-  RUNTIME DESTINATION bin
-)
+  target_link_libraries(veil-server PRIVATE veil_common)
+  veil_set_warnings(veil-server)
+
+  install(TARGETS veil-server
+    RUNTIME DESTINATION bin
+  )
+endif()
 
 # GUI applications (optional, require Qt6)
 option(VEIL_BUILD_GUI "Build Qt GUI applications" ON)
 
 if(VEIL_BUILD_GUI)
   add_subdirectory(gui-client)
-  add_subdirectory(gui-server)
+  if(VEIL_BUILD_SERVER)
+    add_subdirectory(gui-server)
+  endif()
 endif()

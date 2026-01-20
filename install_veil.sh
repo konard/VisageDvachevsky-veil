@@ -351,6 +351,15 @@ build_veil() {
         "-GNinja"
     )
 
+    # Enable/disable server build based on mode
+    if [[ "$INSTALL_MODE" == "client" ]]; then
+        cmake_opts+=("-DVEIL_BUILD_SERVER=OFF")
+        log_info "Client mode: building client only..."
+    else
+        cmake_opts+=("-DVEIL_BUILD_SERVER=ON")
+        log_info "Server mode: building both server and client..."
+    fi
+
     # Enable/disable GUI build
     if [[ "$WITH_GUI" == "true" ]]; then
         cmake_opts+=("-DVEIL_BUILD_GUI=ON")
