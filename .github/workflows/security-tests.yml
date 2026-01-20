@@ -1,0 +1,89 @@
+name: Security & Cryptography Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  security-tests:
+    name: Security Tests (Handshake, Encryption, Replay Protection)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            clang \
+            lld \
+            libsodium-dev
+
+      - name: Configure CMake (Debug + Sanitizers)
+        run: |
+          cmake --preset debug \
+            -DVEIL_ENABLE_SANITIZERS=ON \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++
+
+      - name: Build
+        run: cmake --build --preset debug
+
+      - name: Run cryptography unit tests
+        run: |
+          ./build/debug/tests/unit/veil_unit_tests \
+            --gtest_filter="CryptoTests.*:HandshakeTests.*:ReplayWindowTests.*:HandshakeReplayCacheTests.*" \
+            --gtest_output=xml:crypto-test-results.xml
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+
+      - name: Run security integration tests
+        run: |
+          ctest --preset debug \
+            --output-on-failure \
+            --timeout 180 \
+            -R "veil_integration_security"
+        env:
+          VEIL_SKIP_NETEM: 1
+          ASAN_OPTIONS: detect_leaks=0
+
+      - name: Run handshake integration tests
+        run: |
+          ctest --preset debug \
+            --output-on-failure \
+            --timeout 120 \
+            -R "veil_integration_handshake"
+        env:
+          VEIL_SKIP_NETEM: 1
+          ASAN_OPTIONS: detect_leaks=0
+
+      - name: Run obfuscation tests
+        run: |
+          ./build/debug/tests/unit/veil_unit_tests \
+            --gtest_filter="ObfuscationTests.*" \
+            --gtest_output=xml:obfuscation-test-results.xml
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+
+      - name: Verify packet encryption tests
+        run: |
+          ./build/debug/tests/unit/veil_unit_tests \
+            --gtest_filter="PacketTests.*" \
+            --gtest_output=xml:packet-test-results.xml
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-test-results
+          path: |
+            crypto-test-results.xml
+            obfuscation-test-results.xml
+            packet-test-results.xml
+            build/debug/Testing/Temporary/LastTest.log

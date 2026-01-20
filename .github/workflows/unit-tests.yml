@@ -1,4 +1,4 @@
-name: CI
+name: Unit Tests
 
 on:
   push:
@@ -6,9 +6,10 @@ on:
   pull_request:
 
 jobs:
-  build-and-test:
-    name: Build and Test (All)
+  unit-tests:
+    name: Unit Tests (C++20, libsodium, GoogleTest)
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -26,23 +27,27 @@ jobs:
       - name: Configure CMake (Debug + Sanitizers + clang-tidy)
         run: |
           cmake --preset debug \
-            -DVEIL_ENABLE_CLANG_TIDY=ON \
             -DVEIL_ENABLE_SANITIZERS=ON \
+            -DVEIL_ENABLE_CLANG_TIDY=ON \
             -DCMAKE_C_COMPILER=clang \
             -DCMAKE_CXX_COMPILER=clang++
 
       - name: Build
         run: cmake --build --preset debug
 
-      - name: Run all tests
-        run: ctest --preset debug --output-on-failure --timeout 120
+      - name: Run unit tests
+        run: |
+          ctest --preset debug \
+            --output-on-failure \
+            --timeout 60 \
+            -R "veil_unit_tests"
         env:
           VEIL_SKIP_NETEM: 1
           ASAN_OPTIONS: detect_leaks=0
 
-      - name: Upload test results on failure
+      - name: Upload test results
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ci-test-logs
+          name: unit-test-logs
           path: build/debug/Testing/Temporary/LastTest.log
