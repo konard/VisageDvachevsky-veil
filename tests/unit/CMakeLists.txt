@@ -16,6 +16,7 @@ add_executable(veil_unit_tests
   timer_heap_tests.cpp
   obfuscation_tests.cpp
   tun_device_tests.cpp
+  routing_tests.cpp
   mtu_discovery_tests.cpp
   signal_handler_tests.cpp
   daemon_tests.cpp

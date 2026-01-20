@@ -125,6 +125,7 @@ class HandshakeReplayCache {
 
   void evict_lru();
   void touch(const CacheKey& key);
+  std::size_t cleanup_expired_locked(std::uint64_t current_time_ms);
 
   const std::size_t capacity_;
   const std::chrono::milliseconds time_window_;

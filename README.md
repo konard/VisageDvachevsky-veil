@@ -1,5 +1,11 @@
 # VEIL
 
+[![CI](https://github.com/VisageDvachevsky/veil/actions/workflows/ci.yml/badge.svg)](https://github.com/VisageDvachevsky/veil/actions/workflows/ci.yml)
+[![Unit Tests](https://github.com/VisageDvachevsky/veil/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/VisageDvachevsky/veil/actions/workflows/unit-tests.yml)
+[![Integration Tests](https://github.com/VisageDvachevsky/veil/actions/workflows/integration-tests.yml/badge.svg)](https://github.com/VisageDvachevsky/veil/actions/workflows/integration-tests.yml)
+[![Security Tests](https://github.com/VisageDvachevsky/veil/actions/workflows/security-tests.yml/badge.svg)](https://github.com/VisageDvachevsky/veil/actions/workflows/security-tests.yml)
+[![Network Emulation](https://github.com/VisageDvachevsky/veil/actions/workflows/network-emulation.yml/badge.svg)](https://github.com/VisageDvachevsky/veil/actions/workflows/network-emulation.yml)
+
 A secure UDP-based transport protocol with cryptographic handshakes and encrypted data transfer.
 
 ## Building

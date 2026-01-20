@@ -1,0 +1,127 @@
+name: Network Emulation Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  network-emulation:
+    name: Network Emulation (netem - delay, jitter, packet loss)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            clang \
+            lld \
+            libsodium-dev \
+            iproute2
+
+      - name: Configure CMake (Debug)
+        run: |
+          cmake --preset debug \
+            -DVEIL_ENABLE_SANITIZERS=ON \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++
+
+      - name: Build
+        run: cmake --build --preset debug
+
+      - name: Setup netem - Basic delay
+        run: |
+          # Add 50ms delay with 10ms jitter to loopback
+          sudo tc qdisc add dev lo root netem delay 50ms 10ms
+          echo "Netem configured with 50ms delay + 10ms jitter"
+          sudo tc qdisc show dev lo
+
+      - name: Run transport tests with netem (delay + jitter)
+        run: |
+          ctest --preset debug \
+            --output-on-failure \
+            --timeout 180 \
+            -R "veil_integration_transport"
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+
+      - name: Clean netem (delay)
+        if: always()
+        run: |
+          sudo tc qdisc del dev lo root || true
+
+      - name: Setup netem - Packet loss
+        run: |
+          # Add 50ms delay with 1% packet loss
+          sudo tc qdisc add dev lo root netem delay 50ms 10ms loss 1%
+          echo "Netem configured with 50ms delay + 10ms jitter + 1% loss"
+          sudo tc qdisc show dev lo
+
+      - name: Run reliability tests with netem (packet loss)
+        run: |
+          ctest --preset debug \
+            --output-on-failure \
+            --timeout 180 \
+            -R "veil_integration_reliability"
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+
+      - name: Clean netem (packet loss)
+        if: always()
+        run: |
+          sudo tc qdisc del dev lo root || true
+
+      - name: Setup netem - High latency
+        run: |
+          # Add 200ms delay with 50ms jitter
+          sudo tc qdisc add dev lo root netem delay 200ms 50ms
+          echo "Netem configured with 200ms delay + 50ms jitter (high latency)"
+          sudo tc qdisc show dev lo
+
+      - name: Run all integration tests with high latency
+        run: |
+          ctest --preset debug \
+            --output-on-failure \
+            --timeout 300 \
+            -R "veil_integration_"
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+
+      - name: Clean netem (high latency)
+        if: always()
+        run: |
+          sudo tc qdisc del dev lo root || true
+
+      - name: Setup netem - Adverse conditions
+        run: |
+          # Simulate poor network: 100ms delay, 30ms jitter, 3% loss
+          sudo tc qdisc add dev lo root netem delay 100ms 30ms loss 3%
+          echo "Netem configured with adverse conditions (100ms delay + 30ms jitter + 3% loss)"
+          sudo tc qdisc show dev lo
+
+      - name: Run transport tests under adverse conditions
+        run: |
+          ctest --preset debug \
+            --output-on-failure \
+            --timeout 300 \
+            -R "veil_integration_transport"
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+
+      - name: Final netem cleanup
+        if: always()
+        run: |
+          sudo tc qdisc del dev lo root || true
+          echo "Netem cleaned up"
+
+      - name: Upload test results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-emulation-logs
+          path: build/debug/Testing/Temporary/LastTest.log

@@ -117,7 +117,11 @@ class TransportSession {
   // Check if session should rotate (time or packet count threshold).
   bool should_rotate_session();
 
-  // Perform session rotation (generates new session ID, resets counters).
+  /// Perform session rotation.
+  /// IMPORTANT: This ONLY rotates the session_id for protocol-level management.
+  /// The send_sequence_ counter is NOT reset - it continues monotonically.
+  /// This is critical for nonce uniqueness: nonce = derive_nonce(base_nonce, send_sequence_).
+  /// See Issue #3 for detailed security analysis.
   void rotate_session();
 
   // Get current session ID.
@@ -148,6 +152,10 @@ class TransportSession {
   std::uint64_t current_session_id_;
 
   // Sequence counters.
+  // SECURITY-CRITICAL: send_sequence_ is used for nonce derivation.
+  // It MUST NEVER be reset - it continues monotonically across session rotations.
+  // nonce = derive_nonce(base_nonce, send_sequence_)
+  // Resetting would cause nonce reuse, completely breaking ChaCha20-Poly1305 security.
   std::uint64_t send_sequence_{0};
   std::uint64_t recv_sequence_max_{0};
 
