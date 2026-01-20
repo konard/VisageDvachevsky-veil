@@ -81,6 +81,7 @@ TEST_F(ThreadCheckerTest, MoveConstructorTransfersOwnership) {
   // In debug mode, detached checker has empty thread::id
 #ifndef NDEBUG
   // A detached checker's owner_thread_id is default (empty)
+  // NOLINTNEXTLINE(bugprone-use-after-move)
   EXPECT_EQ(original.owner_thread_id(), std::thread::id{});
 #endif
 }
@@ -96,6 +97,7 @@ TEST_F(ThreadCheckerTest, MoveAssignmentTransfersOwnership) {
   EXPECT_TRUE(target.is_owner_thread());
 
 #ifndef NDEBUG
+  // NOLINTNEXTLINE(bugprone-use-after-move)
   EXPECT_EQ(original.owner_thread_id(), std::thread::id{});
 #endif
 }
