@@ -232,6 +232,7 @@ bool RouteManager::check_firewall_availability(std::error_code& ec) {
 void RouteManager::log_iptables_state(const std::string& phase) {
   std::error_code ec;
 
+  (void)phase;  // Used in LOG_DEBUG which may be compiled out
   LOG_DEBUG("=== iptables state {} ===", phase);
 
   // Log NAT table POSTROUTING chain
@@ -279,9 +280,6 @@ bool RouteManager::configure_nat(const NatConfig& config, std::error_code& ec) {
 
   // Track what we've successfully added for rollback if needed.
   bool forwarding_enabled = false;
-  bool nat_rule_added = false;
-  bool forward_in_added = false;
-  bool forward_out_added = false;
 
   // Enable IP forwarding first.
   if (config.enable_forwarding) {
@@ -303,7 +301,6 @@ bool RouteManager::configure_nat(const NatConfig& config, std::error_code& ec) {
     }
     return false;
   }
-  nat_rule_added = true;
 
   // Add FORWARD rule for incoming traffic.
   std::ostringstream forward_in;
@@ -319,7 +316,6 @@ bool RouteManager::configure_nat(const NatConfig& config, std::error_code& ec) {
     }
     return false;
   }
-  forward_in_added = true;
 
   // Add FORWARD rule for outgoing traffic.
   std::ostringstream forward_out;
@@ -338,7 +334,6 @@ bool RouteManager::configure_nat(const NatConfig& config, std::error_code& ec) {
     }
     return false;
   }
-  forward_out_added = true;
 
   // All rules added successfully.
   nat_configured_ = true;

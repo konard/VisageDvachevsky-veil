@@ -82,7 +82,7 @@ TEST_F(RoutingIntegrationTest, CheckIpForwarding) {
   std::error_code ec;
 
   // Should be able to read IP forwarding state.
-  bool forwarding = manager.is_ip_forwarding_enabled(ec);
+  (void)manager.is_ip_forwarding_enabled(ec);
   EXPECT_FALSE(ec) << "Failed to check IP forwarding: " << ec.message();
   // Value can be true or false, we just care that it doesn't error.
 }
