@@ -570,7 +570,9 @@ TEST_F(MultiClientTest, SessionIsolation) {
   EXPECT_FALSE(result.has_value()) << "Packet should not decrypt with wrong session keys";
 }
 
-// Test: Race conditions in session rotation
+// Test: Session rotation with frequent packet sending
+// Note: TransportSession is single-threaded by design (enforced by ThreadChecker).
+// This test verifies rotation behavior with high packet volume, not concurrency.
 TEST_F(MultiClientTest, ConcurrentRotation) {
   auto hs = create_test_session();
   transport::TransportSession session(hs, transport::TransportSessionConfig{
@@ -578,28 +580,25 @@ TEST_F(MultiClientTest, ConcurrentRotation) {
       .session_rotation_packets = 10  // Force frequent rotation
   });
 
-  std::atomic<bool> running{true};
-  std::atomic<std::uint64_t> packets_sent{0};
-  std::atomic<std::uint64_t> rotations{0};
+  std::uint64_t packets_sent = 0;
+  std::uint64_t rotations = 0;
+  auto start_time = std::chrono::steady_clock::now();
+  auto end_time = start_time + 100ms;
 
-  std::thread sender([&]() {
-    while (running.load()) {
-      std::vector<std::uint8_t> data(100);
-      session.encrypt_data(data);
-      ++packets_sent;
+  // Send packets rapidly on the same thread (TransportSession is single-threaded)
+  while (std::chrono::steady_clock::now() < end_time) {
+    std::vector<std::uint8_t> data(100);
+    session.encrypt_data(data);
+    ++packets_sent;
 
-      if (session.should_rotate_session()) {
-        session.rotate_session();
-        ++rotations;
-      }
+    if (session.should_rotate_session()) {
+      session.rotate_session();
+      ++rotations;
     }
-  });
+  }
 
-  std::this_thread::sleep_for(100ms);
-  running.store(false);
-  sender.join();
-
-  EXPECT_GT(packets_sent.load(), 0U) << "Should have sent some packets";
-  std::cout << "Concurrent rotation: " << packets_sent.load() << " packets, "
-            << rotations.load() << " rotations\n";
+  EXPECT_GT(packets_sent, 0U) << "Should have sent some packets";
+  EXPECT_GT(rotations, 0U) << "Should have performed at least one rotation";
+  std::cout << "Session rotation test: " << packets_sent << " packets, "
+            << rotations << " rotations\n";
 }
