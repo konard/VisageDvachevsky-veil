@@ -17,6 +17,7 @@ add_library(veil_common STATIC
   common/utils/graceful_degradation.cpp
   common/metrics/metrics.cpp
   common/obfuscation/obfuscation_profile.cpp
+  common/protocol_wrapper/websocket_wrapper.cpp
   common/signal/signal_handler.cpp
   common/daemon/daemon.cpp
   common/ipc/ipc_protocol.cpp
