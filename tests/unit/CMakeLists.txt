@@ -4,6 +4,7 @@ add_executable(veil_unit_tests
   crypto_tests.cpp
   packet_tests.cpp
   replay_window_tests.cpp
+  handshake_tests.cpp
   handshake_replay_cache_tests.cpp
   ack_bitmap_tests.cpp
   reorder_buffer_tests.cpp
