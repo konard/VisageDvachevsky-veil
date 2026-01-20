@@ -1,25 +1,26 @@
 [Unit]
-Description=VEIL VPN Client Daemon
-After=network.target
+Description=VEIL VPN Client
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-Type=forking
-PIDFile=/var/run/veil-client.pid
-ExecStart=/usr/local/bin/veil-client --daemon --pid-file=/var/run/veil-client.pid --config=/etc/veil/client.conf
-ExecReload=/bin/kill -HUP $MAINPID
+Type=simple
+ExecStart=/usr/local/bin/veil-client --config /etc/veil/client.conf
 Restart=on-failure
-RestartSec=5s
+RestartSec=5
 User=root
 Group=root
 
 # Security hardening
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/run /var/log/veil
+ReadWritePaths=/var/run /var/log /var/log/veil
+NoNewPrivileges=true
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=512
 
 [Install]
 WantedBy=multi-user.target
