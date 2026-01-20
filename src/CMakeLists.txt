@@ -65,6 +65,10 @@ add_executable(veil-client
 target_link_libraries(veil-client PRIVATE veil_common)
 veil_set_warnings(veil-client)
 
+install(TARGETS veil-client
+  RUNTIME DESTINATION bin
+)
+
 # Server executable.
 add_executable(veil-server
   server/main.cpp
@@ -73,6 +77,10 @@ add_executable(veil-server
 
 target_link_libraries(veil-server PRIVATE veil_common)
 veil_set_warnings(veil-server)
+
+install(TARGETS veil-server
+  RUNTIME DESTINATION bin
+)
 
 # GUI applications (optional, require Qt6)
 option(VEIL_BUILD_GUI "Build Qt GUI applications" ON)
