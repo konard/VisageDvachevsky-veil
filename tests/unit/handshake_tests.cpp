@@ -112,11 +112,13 @@ TEST(HandshakeTests, InitPacketDoesNotContainPlaintextMagicBytes) {
   }
   EXPECT_FALSE(found_magic) << "Plaintext magic bytes 'HS' found in encrypted handshake packet";
 
-  // The encrypted packet should be larger due to nonce (12 bytes) and AEAD tag (16 bytes)
+  // The encrypted packet should be larger due to nonce (12 bytes), AEAD tag (16 bytes), and padding
   // Original INIT size: 2 + 1 + 1 + 8 + 32 + 32 = 76 bytes
-  // Encrypted size: 12 (nonce) + 76 (plaintext) + 16 (tag) = 104 bytes
-  EXPECT_EQ(init_bytes.size(), 104u)
-      << "Encrypted INIT packet should be 104 bytes (12 nonce + 76 plaintext + 16 tag)";
+  // With padding: 76 + 2 (padding length) + 32-400 (padding) = 110-478 bytes
+  // Encrypted size: 12 (nonce) + plaintext + 16 (tag) = 138-506 bytes
+  // Verify size is within expected range
+  EXPECT_GE(init_bytes.size(), 138u) << "Encrypted INIT packet should be at least 138 bytes";
+  EXPECT_LE(init_bytes.size(), 506u) << "Encrypted INIT packet should be at most 506 bytes";
 }
 
 TEST(HandshakeTests, ResponsePacketDoesNotContainPlaintextMagicBytes) {
@@ -147,9 +149,11 @@ TEST(HandshakeTests, ResponsePacketDoesNotContainPlaintextMagicBytes) {
   EXPECT_FALSE(found_magic) << "Plaintext magic bytes 'HS' found in encrypted response packet";
 
   // Original RESPONSE size: 2 + 1 + 1 + 8 + 8 + 8 + 32 + 32 = 92 bytes
-  // Encrypted size: 12 (nonce) + 92 (plaintext) + 16 (tag) = 120 bytes
-  EXPECT_EQ(response_bytes.size(), 120u)
-      << "Encrypted RESPONSE packet should be 120 bytes (12 nonce + 92 plaintext + 16 tag)";
+  // With padding: 92 + 2 (padding length) + 32-400 (padding) = 126-494 bytes
+  // Encrypted size: 12 (nonce) + plaintext + 16 (tag) = 154-522 bytes
+  // Verify size is within expected range
+  EXPECT_GE(response_bytes.size(), 154u) << "Encrypted RESPONSE packet should be at least 154 bytes";
+  EXPECT_LE(response_bytes.size(), 522u) << "Encrypted RESPONSE packet should be at most 522 bytes";
 }
 
 TEST(HandshakeTests, EncryptedPacketsAppearRandom) {
