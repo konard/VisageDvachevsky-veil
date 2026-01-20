@@ -12,6 +12,7 @@
 #include "common/handshake/handshake_processor.h"
 #include "common/session/replay_window.h"
 #include "common/session/session_rotator.h"
+#include "common/utils/thread_checker.h"
 #include "transport/mux/ack_bitmap.h"
 #include "transport/mux/fragment_reassembly.h"
 #include "transport/mux/mux_codec.h"
@@ -56,9 +57,22 @@ struct TransportStats {
   std::uint64_t session_rotations{0};
 };
 
-// Encrypted transport session built from handshake result.
-// Handles encryption/decryption, replay protection, fragmentation,
-// retransmission, and session rotation.
+/**
+ * Encrypted transport session built from handshake result.
+ * Handles encryption/decryption, replay protection, fragmentation,
+ * retransmission, and session rotation.
+ *
+ * Thread Safety:
+ *   This class is NOT thread-safe. All methods must be called from a single
+ *   thread (typically the event loop thread that owns this session).
+ *   The session contains internal state (sequence counters, replay window,
+ *   retransmit buffer) that is not protected by locks.
+ *
+ *   If you need to access the session from multiple threads, external
+ *   synchronization is required.
+ *
+ * @see docs/thread_model.md for the VEIL threading model documentation.
+ */
 class TransportSession {
  public:
   using Clock = std::chrono::steady_clock;
@@ -155,6 +169,9 @@ class TransportSession {
 
   // Statistics.
   TransportStats stats_;
+
+  // Thread safety: verifies single-threaded access in debug builds.
+  VEIL_THREAD_CHECKER(thread_checker_);
 };
 
 }  // namespace veil::transport

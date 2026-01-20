@@ -41,6 +41,8 @@ TransportSession::~TransportSession() {
 
 std::vector<std::vector<std::uint8_t>> TransportSession::encrypt_data(
     std::span<const std::uint8_t> plaintext, std::uint64_t stream_id, bool fin) {
+  VEIL_DCHECK_THREAD(thread_checker_);
+
   std::vector<std::vector<std::uint8_t>> result;
 
   // Fragment data if necessary.
@@ -69,6 +71,8 @@ std::vector<std::vector<std::uint8_t>> TransportSession::encrypt_data(
 
 std::optional<std::vector<mux::MuxFrame>> TransportSession::decrypt_packet(
     std::span<const std::uint8_t> ciphertext) {
+  VEIL_DCHECK_THREAD(thread_checker_);
+
   // Minimum packet size: nonce (8 bytes for sequence) + tag (16 bytes) + header (1 byte minimum)
   constexpr std::size_t kMinPacketSize = 8 + 16 + 1;
   if (ciphertext.size() < kMinPacketSize) {
@@ -125,6 +129,8 @@ std::optional<std::vector<mux::MuxFrame>> TransportSession::decrypt_packet(
 }
 
 std::vector<std::vector<std::uint8_t>> TransportSession::get_retransmit_packets() {
+  VEIL_DCHECK_THREAD(thread_checker_);
+
   std::vector<std::vector<std::uint8_t>> result;
   auto to_retransmit = retransmit_buffer_.get_packets_to_retransmit();
 
@@ -142,6 +148,8 @@ std::vector<std::vector<std::uint8_t>> TransportSession::get_retransmit_packets(
 }
 
 void TransportSession::process_ack(const mux::AckFrame& ack) {
+  VEIL_DCHECK_THREAD(thread_checker_);
+
   // Cumulative ACK.
   retransmit_buffer_.acknowledge_cumulative(ack.ack);
 
@@ -157,6 +165,8 @@ void TransportSession::process_ack(const mux::AckFrame& ack) {
 }
 
 mux::AckFrame TransportSession::generate_ack(std::uint64_t stream_id) {
+  VEIL_DCHECK_THREAD(thread_checker_);
+
   return mux::AckFrame{
       .stream_id = stream_id,
       .ack = recv_ack_bitmap_.head(),
@@ -165,10 +175,13 @@ mux::AckFrame TransportSession::generate_ack(std::uint64_t stream_id) {
 }
 
 bool TransportSession::should_rotate_session() {
+  VEIL_DCHECK_THREAD(thread_checker_);
   return session_rotator_.should_rotate(packets_since_rotation_, now_fn_());
 }
 
 void TransportSession::rotate_session() {
+  VEIL_DCHECK_THREAD(thread_checker_);
+
   current_session_id_ = session_rotator_.rotate(now_fn_());
   packets_since_rotation_ = 0;
   ++stats_.session_rotations;
