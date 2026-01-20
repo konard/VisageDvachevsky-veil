@@ -1,0 +1,32 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential \
+      cmake \
+      ninja-build \
+      clang \
+      clang-tidy \
+      lld \
+      pkg-config \
+      git \
+      ca-certificates \
+      libsodium-dev \
+      libpcap-dev \
+      ndpi-tools \
+      tcpdump \
+      tshark \
+      iproute2 \
+      net-tools \
+      iptables \
+      python3 \
+      python3-pip && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m veil && echo "veil ALL=(ALL) NOPASSWD:ALL" >/etc/sudoers.d/veil
+USER veil
+WORKDIR /home/veil/veil
+
+CMD ["/bin/bash"]

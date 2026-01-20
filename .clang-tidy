@@ -1,0 +1,47 @@
+---
+# VEIL clang-tidy configuration
+# Focus on real bugs and performance issues, not style nits.
+#
+# Disabled checks rationale:
+# - modernize-use-trailing-return-type: Style preference, not a bug
+# - modernize-return-braced-init-list: Style preference
+# - modernize-type-traits: Compatibility with C++11/14 patterns
+# - modernize-use-auto: Explicit types can improve readability
+# - modernize-use-nodiscard: Nice to have but not critical
+# - modernize-avoid-c-arrays: C-style arrays needed for C API interop (argv, etc.)
+# - modernize-deprecated-headers: Some POSIX headers have no C++ equivalents
+# - performance-enum-size: Micro-optimization, not a bug
+# - performance-move-const-arg: Trivially copyable types are ok to copy
+# - readability-magic-numbers: Protocol constants are clear in context
+# - bugprone-easily-swappable-parameters: Too noisy for crypto APIs
+# - bugprone-unchecked-optional-access: Tests use ASSERT_TRUE before .value()
+
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-unchecked-optional-access,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  -modernize-return-braced-init-list,
+  -modernize-type-traits,
+  -modernize-use-auto,
+  -modernize-use-nodiscard,
+  -modernize-avoid-c-arrays,
+  -modernize-deprecated-headers,
+  performance-*,
+  -performance-enum-size,
+  -performance-move-const-arg,
+  readability-implicit-bool-conversion,
+  -readability-magic-numbers
+
+WarningsAsErrors: '*'
+
+# Only check our own headers, not third-party deps
+HeaderFilterRegex: '^.*/src/.*\.h$'
+
+FormatStyle: none
+
+CheckOptions:
+  - key: bugprone-suspicious-include.HeaderFileExtensions
+    value: 'h,hpp'

@@ -1,0 +1,1224 @@
+Отлично, теперь у меня достаточно информации для составления полноценного ТЗ.
+
+***
+
+# Техническое задание: VPN-протокол VEIL (Variable Entropy Identification Layer)
+
+## 1. Общая информация
+
+**Название проекта**: VEIL — анти-DPI VPN-протокол нового поколения  
+**Язык реализации**: C++17 или выше  
+**Целевая платформа**: Linux (основной), Windows (опционально)  
+**Тип приложения**: Клиент-серверное UDP-приложение  
+**Цель**: Создать VPN-протокол, не обнаруживаемый современными системами DPI/ТСПУ
+
+***
+
+## 2. Ключевые требования
+
+### 2.1. Функциональные требования
+
+#### 2.1.1. Обход DPI-систем
+- Протокол НЕ должен иметь статических сигнатур в первых пакетах
+- Каждый клиент генерирует уникальный профиль трафика (на основе seed)
+- Packet size distribution должен быть переменным и уникальным для каждого клиента
+- Timing между пакетами должен имитировать естественный IoT/сенсорный трафик
+
+#### 2.1.2. Криптография
+- Использовать X25519 для key exchange
+- Использовать ChaCha20-Poly1305 AEAD для шифрования данных
+- Обеспечить Forward Secrecy через регулярную ротацию сессионных ключей
+- Защита от replay атак через timestamp-based tokens
+
+#### 2.1.3. Транспортный уровень
+- UDP как базовый транспорт
+- Собственный механизм selective retransmission (не TCP, не QUIC)
+- Поддержка мультиплексирования нескольких логических потоков
+- Out-of-order delivery с последующей переупорядочиванием
+
+#### 2.1.4. Anti-probing
+- Сервер молча игнорирует пакеты без корректного криптографического токена
+- Нет ICMP/UDP ответов на неправильные пакеты
+- Rate limiting для защиты от flooding
+
+### 2.2. Нефункциональные требования
+
+#### 2.2.1. Производительность
+- Throughput: не менее 500 Mbps на современном CPU (без AES-NI)
+- Latency: handshake не более 150 мс (при RTT 50 мс)
+- Memory footprint: не более 50 MB на 1000 активных соединений
+
+#### 2.2.2. Безопасность
+- Отсутствие известных криптографических уязвимостей
+- Защита от timing attacks через constant-time операции
+- Невозможность fingerprinting через активный probing
+
+#### 2.2.3. Масштабируемость
+- Поддержка 10,000+ одновременных соединений на сервере
+- Возможность горизонтального масштабирования (stateless session restoration)
+
+***
+
+## 3. Архитектура системы
+
+### 3.1. Общая структура
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                     VEIL PROTOCOL STACK                   │
+├──────────────────────────────────────────────────────────┤
+│                                                           │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │ L3: Traffic Morphing Layer (Obfuscation)        │    │
+│  │ - Packet size randomization                     │    │
+│  │ - Timing jitter (Poisson + seed-based)          │    │
+│  │ - Heartbeat frames (fake sensor telemetry)      │    │
+│  └─────────────────────────────────────────────────┘    │
+│                         ↓                                │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │ L2: Transport Layer (Custom UDP reliability)    │    │
+│  │ - Stream multiplexing (VLQ encoding)            │    │
+│  │ - Selective ACK mechanism                       │    │
+│  │ - Fragment reassembly                           │    │
+│  └─────────────────────────────────────────────────┘    │
+│                         ↓                                │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │ L1: Crypto Layer (Handshake + Encryption)       │    │
+│  │ - X25519 key exchange                           │    │
+│  │ - ChaCha20-Poly1305 AEAD                        │    │
+│  │ - Session key rotation (30 sec intervals)       │    │
+│  └─────────────────────────────────────────────────┘    │
+│                         ↓                                │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │ L0: UDP Socket Layer                            │    │
+│  │ - Platform-agnostic socket abstraction          │    │
+│  │ - Non-blocking I/O (epoll/IOCP)                 │    │
+│  └─────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────┘
+```
+
+### 3.2. Компоненты системы
+
+#### 3.2.1. Клиент (veil-client)
+- **Функции**:
+  - Установление соединения с сервером
+  - Шифрование исходящего трафика
+  - Расшифровка входящего трафика
+  - Traffic morphing (обфускация)
+  
+- **Модули**:
+  - `ConnectionManager` — управление состоянием соединения
+  - `CryptoEngine` — криптографические операции
+  - `PacketBuilder` — формирование VEIL пакетов
+  - `TrafficMorpher` — обфускация трафика
+  - `UDPSocket` — работа с UDP сокетами
+
+#### 3.2.2. Сервер (veil-server)
+- **Функции**:
+  - Приём и валидация handshake
+  - Управление множеством клиентских сессий
+  - Маршрутизация трафика в интернет (NAT/routing)
+  - Rate limiting и защита от abuse
+  
+- **Модули**:
+  - `SessionManager` — управление активными сессиями
+  - `HandshakeValidator` — проверка корректности handshake
+  - `CryptoEngine` — криптографические операции
+  - `PacketRouter` — маршрутизация пакетов
+  - `RateLimiter` — защита от flooding
+
+#### 3.2.3. Общие компоненты (veil-common)
+- `Crypto` — X25519, ChaCha20-Poly1305, HMAC-SHA256
+- `PacketFormat` — определение структуры пакетов
+- `Configuration` — парсинг конфигурационных файлов
+- `Logger` — логирование событий
+
+***
+
+## 4. Формат пакета VEIL
+
+### 4.1. Структура зашифрованного пакета
+
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
+|          Random Prefix (4-12 bytes, variable length)          |
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
+|                                                               |
+|                                                               |
+|           Encrypted Payload (variable length)                 |
+|           ┌─────────────────────────────────────┐            |
+|           │ Frame Type (1 byte)                  │            |
+|           │ Sequence Number (4 bytes)            │            |
+|           │ Session ID (4 bytes)                 │            |
+|           │ Payload Length (2 bytes)             │            |
+|           │ Payload Data (0-1200 bytes)          │            |
+|           └─────────────────────────────────────┘            |
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
+|           Poly1305 Authentication Tag (16 bytes)              |
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
+|          Random Padding (0-400 bytes, variable)               |
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+### 4.2. Типы фреймов (Frame Type)
+
+```
+0x01 - HANDSHAKE        : Инициализация соединения
+0x02 - DATA             : Пользовательские данные
+0x03 - ACK              : Подтверждение получения
+0x04 - HEARTBEAT        : Fake IoT telemetry (keep-alive)
+0x05 - KEEPALIVE        : Поддержание соединения
+0x06 - SESSION_ROTATE   : Ротация сессионного ключа
+0x07 - CLOSE            : Закрытие соединения
+```
+
+### 4.3. Вычисление размеров полей
+
+#### Random Prefix Length
+```
+prefix_len = 4 + (HMAC-SHA256(profile_seed, "prefix" || seq_number)[0] % 9)
+// Результат: 4..12 байт
+```
+
+#### Random Padding Length
+```
+padding_len = (HMAC-SHA256(profile_seed, "padding" || seq_number)[0:2] % max_padding)
+max_padding = config.max_padding_size  // например, 400
+// Результат: 0..400 байт
+```
+
+#### IV для ChaCha20
+```
+IV = HMAC-SHA256(session_key, seq_number || session_id)[0:12]
+// 96-bit nonce для ChaCha20-IETF
+```
+
+***
+
+## 5. Handshake протокол (Simplified Production Implementation)
+
+**Примечание**: Текущая реализация использует упрощённую, но криптографически безопасную
+схему handshake. Она проще, чем первоначальная спецификация, но обеспечивает те же
+гарантии безопасности: аутентификация, forward secrecy, защита от replay-атак.
+
+### 5.1. Фаза 1: Client → Server (INIT)
+
+**Цель**: Установить аутентифицированную сессию с forward secrecy
+
+#### Структура INIT Message
+
+```
+Wire format:
+[Magic:2] [Version:1] [Type:1] [Timestamp:8] [EphemeralPubKey:32] [HMAC:32]
+
+struct InitMessage {
+    uint8_t  magic[2];                 // "HS"
+    uint8_t  version;                  // 0x01
+    uint8_t  type;                     // 0x01 (kInit)
+    uint64_t timestamp_ms;             // Миллисекунды с epoch (big-endian)
+    uint8_t  ephemeral_public_key[32]; // X25519 ephemeral public key
+    uint8_t  hmac[32];                 // HMAC-SHA256 auth tag
+}
+// Total: 2 + 1 + 1 + 8 + 32 + 32 = 76 bytes
+```
+
+#### HMAC Payload для INIT:
+```
+hmac_payload = [Magic:2] [Version:1] [Type:1] [Timestamp:8] [EphemeralPubKey:32]
+hmac = HMAC-SHA256(PSK, hmac_payload)
+```
+
+#### Псевдокод клиента
+
+```cpp
+// Генерация ephemeral keypair для Forward Secrecy
+KeyPair ephemeral = generate_x25519_keypair()
+
+// Текущий timestamp (миллисекунды)
+uint64_t timestamp_ms = current_time_ms()
+
+// Формирование HMAC payload
+hmac_payload = build_init_hmac_payload(timestamp_ms, ephemeral.public_key)
+
+// Вычисление HMAC для аутентификации
+hmac = HMAC_SHA256(PSK, hmac_payload)
+
+// Формирование INIT сообщения
+init_msg = {
+    magic: "HS",
+    version: 0x01,
+    type: 0x01,  // kInit
+    timestamp_ms: timestamp_ms,
+    ephemeral_public_key: ephemeral.public_key,
+    hmac: hmac
+}
+
+// Отправка на сервер
+udp_socket.send(init_msg, server_address)
+```
+
+### 5.2. Фаза 2: Server → Client (RESPONSE)
+
+**Цель**: Подтвердить handshake и передать session parameters
+
+#### Структура RESPONSE Message
+
+```
+Wire format:
+[Magic:2] [Version:1] [Type:1] [InitTS:8] [RespTS:8] [SessionID:8]
+[ResponderPubKey:32] [HMAC:32]
+
+struct ResponseMessage {
+    uint8_t  magic[2];                     // "HS"
+    uint8_t  version;                      // 0x01
+    uint8_t  type;                         // 0x02 (kResponse)
+    uint64_t init_timestamp_ms;            // Отражение timestamp из INIT
+    uint64_t response_timestamp_ms;        // Timestamp сервера
+    uint64_t session_id;                   // Случайный session ID
+    uint8_t  responder_ephemeral_key[32];  // Ephemeral key сервера
+    uint8_t  hmac[32];                     // HMAC-SHA256 auth tag
+}
+// Total: 2 + 1 + 1 + 8 + 8 + 8 + 32 + 32 = 92 bytes
+```
+
+#### HMAC Payload для RESPONSE:
+```
+hmac_payload = [Magic:2] [Version:1] [Type:1] [InitTS:8] [RespTS:8]
+               [SessionID:8] [InitPubKey:32] [RespPubKey:32]
+hmac = HMAC-SHA256(PSK, hmac_payload)
+```
+
+#### Псевдокод сервера
+
+```cpp
+// Получение и парсинг INIT
+init_msg = parse_init_message(received_packet)
+
+// Проверка magic и version
+if (init_msg.magic != "HS" || init_msg.version != 0x01 || init_msg.type != 0x01)
+    return IGNORE_SILENTLY
+
+// Rate limiting (защита от flooding)
+if (!rate_limiter.allow())
+    return IGNORE_SILENTLY
+
+// Проверка timestamp (защита от replay)
+if (!timestamp_valid(init_msg.timestamp_ms, skew_tolerance))
+    return IGNORE_SILENTLY
+
+// Проверка replay cache (критическое дополнение!)
+if (replay_cache.mark_and_check(init_msg.timestamp_ms, init_msg.ephemeral_key))
+    return IGNORE_SILENTLY  // Replay detected
+
+// Проверка HMAC
+hmac_payload = build_init_hmac_payload(init_msg.timestamp_ms, init_msg.ephemeral_key)
+expected_hmac = HMAC_SHA256(PSK, hmac_payload)
+if (init_msg.hmac != expected_hmac)
+    return IGNORE_SILENTLY  // Anti-probing: no response
+
+// HMAC OK! Генерация ephemeral keypair сервера
+KeyPair responder_keys = generate_x25519_keypair()
+
+// Вычисление shared secret через ECDH
+shared_secret = compute_shared_secret(responder_keys.secret_key,
+                                      init_msg.ephemeral_key)
+
+// Деривация session keys через HKDF
+info = "VEILHS1" || init_ephemeral_key || responder_ephemeral_key
+session_keys = derive_session_keys(shared_secret, PSK, info, is_initiator=false)
+
+// Генерация session ID
+session_id = random_uint64()
+
+// Формирование RESPONSE
+response_timestamp_ms = current_time_ms()
+hmac_payload = build_hmac_payload(kResponse, init_msg.timestamp_ms,
+                                   response_timestamp_ms, session_id,
+                                   init_msg.ephemeral_key, responder_keys.public_key)
+response_hmac = HMAC_SHA256(PSK, hmac_payload)
+
+response_msg = {
+    magic: "HS",
+    version: 0x01,
+    type: 0x02,  // kResponse
+    init_timestamp_ms: init_msg.timestamp_ms,  // Echo back
+    response_timestamp_ms: response_timestamp_ms,
+    session_id: session_id,
+    responder_ephemeral_key: responder_keys.public_key,
+    hmac: response_hmac
+}
+
+// Создание session state
+sessions[session_id] = {
+    keys: session_keys,
+    initiator_ephemeral: init_msg.ephemeral_key,
+    responder_ephemeral: responder_keys.public_key,
+    ...
+}
+
+// Отправка RESPONSE
+udp_socket.send(response_msg, client_address)
+```
+
+#### Псевдокод клиента (обработка RESPONSE)
+
+```cpp
+// Получение и парсинг RESPONSE
+response_msg = parse_response_message(received_packet)
+
+// Проверка, что мы отправляли INIT
+if (!init_sent)
+    return ERROR
+
+// Проверка magic, version, type
+if (response_msg.magic != "HS" || response_msg.version != 0x01 ||
+    response_msg.type != 0x02)
+    return ERROR
+
+// Проверка, что init_timestamp соответствует нашему INIT
+if (response_msg.init_timestamp_ms != our_init_timestamp)
+    return ERROR
+
+// Проверка response timestamp
+if (!timestamp_valid(response_msg.response_timestamp_ms, skew_tolerance))
+    return ERROR
+
+// Проверка HMAC
+hmac_payload = build_hmac_payload(kResponse, response_msg.init_timestamp_ms,
+                                   response_msg.response_timestamp_ms,
+                                   response_msg.session_id,
+                                   our_ephemeral.public_key,
+                                   response_msg.responder_ephemeral_key)
+expected_hmac = HMAC_SHA256(PSK, hmac_payload)
+if (response_msg.hmac != expected_hmac)
+    return ERROR
+
+// HMAC OK! Вычисление shared secret
+shared_secret = compute_shared_secret(our_ephemeral.secret_key,
+                                      response_msg.responder_ephemeral_key)
+
+// Деривация session keys
+info = "VEILHS1" || our_ephemeral.public_key || response_msg.responder_ephemeral_key
+session_keys = derive_session_keys(shared_secret, PSK, info, is_initiator=true)
+
+// Handshake завершён успешно
+return HandshakeSession{
+    session_id: response_msg.session_id,
+    keys: session_keys,
+    initiator_ephemeral: our_ephemeral.public_key,
+    responder_ephemeral: response_msg.responder_ephemeral_key
+}
+```
+
+### 5.3. Результат успешного Handshake
+
+После завершения handshake обе стороны имеют:
+- `session_id` — уникальный идентификатор сессии (64-bit random)
+- `session_keys` — производные ключи для шифрования:
+  - `send_key` [32 bytes] — ключ для ChaCha20-Poly1305 (отправка)
+  - `recv_key` [32 bytes] — ключ для ChaCha20-Poly1305 (приём)
+  - `send_nonce` [12 bytes] — базовый nonce для отправки
+  - `recv_nonce` [12 bytes] — базовый nonce для приёма
+- Ephemeral keys уничтожены → Forward Secrecy обеспечен
+
+### 5.4. Защита от Replay-атак
+
+**Критическое требование безопасности**: Handshake INIT messages должны быть защищены от replay.
+
+Текущая реализация использует **двухуровневую защиту**:
+
+1. **Timestamp Validation**:
+   - Timestamp должен быть в пределах `skew_tolerance` (по умолчанию: 30 секунд)
+   - Проверка: `|current_time_ms - init_timestamp_ms| <= skew_tolerance`
+
+2. **Replay Cache** (LRU Cache):
+   - Хранит пары `(timestamp_ms, ephemeral_public_key)` для недавних INIT
+   - Capacity: 4096 записей (настраиваемо)
+   - Time window: 60 секунд (настраиваемо)
+   - При получении INIT:
+     - Проверить, встречалась ли пара `(ts, eph_key)` раньше
+     - Если ДА → IGNORE_SILENTLY (replay detected)
+     - Если НЕТ → добавить в cache и продолжить обработку
+   - LRU eviction при достижении capacity
+   - Автоматическая очистка expired entries
+
+**Важно**: Replay check должен выполняться **ДО** проверки HMAC для соблюдения
+anti-probing requirement (не давать информацию атакующему)
+
+***
+
+## 6. Криптографический слой (L1)
+
+### 6.1. Алгоритмы
+
+#### 6.1.1. Key Exchange: X25519
+```
+Параметры:
+- Curve: Curve25519
+- Key size: 256 bit
+- Security level: ~128 bit
+
+Операции:
+- generate_keypair() → (private_key, public_key)
+- compute_shared(my_private, their_public) → shared_secret
+```
+
+#### 6.1.2. Encryption: ChaCha20-Poly1305 AEAD
+```
+Параметры:
+- Cipher: ChaCha20-IETF (96-bit nonce, 32-bit counter)
+- MAC: Poly1305
+- Tag size: 128 bit
+
+Операции:
+- encrypt(key, nonce, plaintext, aad) → (ciphertext, tag)
+- decrypt(key, nonce, ciphertext, tag, aad) → plaintext or ERROR
+```
+
+#### 6.1.3. Key Derivation: HKDF-SHA256
+```
+Операции:
+- derive_key(input_key, info_string, output_len) → derived_key
+
+Примеры:
+- session_key = HKDF(shared_secret, "veil-session-key", 32)
+- rotation_key = HKDF(session_key, "rotation" || counter, 32)
+```
+
+#### 6.1.4. Authentication: HMAC-SHA256
+```
+Операции:
+- hmac(key, message) → 256-bit tag
+
+Использование:
+- auth_token = HMAC(shared_secret, client_id || timestamp)
+- packet_hash = HMAC(session_key, packet_data)
+```
+
+### 6.2. Session Key Rotation
+
+```cpp
+// Каждые 30 секунд генерируется новый session_id
+current_session_id = HMAC_SHA256(session_key, current_time / 30)[0:4]
+
+// Session key остаётся прежним, но session_id меняется
+// Это ломает попытки long-term session tracking
+```
+
+### 6.3. Защита от Replay Attacks
+
+```cpp
+// Timestamp-based protection
+timestamp_window = 180 sec  // 6 интервалов по 30 сек
+
+validate_timestamp(received_timestamp):
+    current = unix_time() / 30
+    if abs(current - received_timestamp) > 6:
+        return INVALID
+    return VALID
+
+// Sequence-based protection (в рамках сессии)
+validate_sequence(session, seq):
+    if seq <= session.last_sequence:
+        return DUPLICATE  // или REPLAY
+    session.last_sequence = seq
+    return VALID
+```
+
+***
+
+## 7. Транспортный слой (L2)
+
+### 7.1. Stream Multiplexing
+
+```cpp
+// Несколько логических потоков в одной UDP-сессии
+struct Stream {
+    uint16_t stream_id;
+    uint32_t sequence;
+    buffer   reassembly_buffer;
+    set      received_sequences;
+}
+
+// В payload пакета:
+struct DataPayload {
+    uint16_t stream_id;
+    uint32_t sequence;
+    uint16_t fragment_offset;
+    uint16_t total_length;
+    uint8_t  flags;  // FIN, ACK_REQUEST, etc.
+    uint8_t  data[];
+}
+```
+
+### 7.2. Selective Retransmission
+
+```cpp
+// Не TCP (no full reliability), не QUIC (слишком узнаваем)
+// Лёгкий механизм ACK для критичных пакетов
+
+struct AckFrame {
+    uint8_t  frame_type;  // 0x03
+    uint16_t stream_id;
+    uint32_t ack_sequence;  // Последний непрерывный полученный seq
+    bitfield missing_sequences;  // Bitmap отсутствующих пакетов
+}
+
+// Отправитель ретранслирует только missing_sequences
+// Это экономит bandwidth и не создаёт паттернов TCP
+```
+
+### 7.3. Fragment Reassembly
+
+```cpp
+// Если пользовательские данные > MTU, фрагментация
+
+fragment_packet(data, mtu):
+    fragments = []
+    offset = 0
+    while offset < len(data):
+        chunk = data[offset:offset+mtu]
+        fragment = {
+            fragment_offset: offset,
+            total_length: len(data),
+            data: chunk
+        }
+        fragments.append(fragment)
+        offset += mtu
+    return fragments
+
+// Получатель собирает фрагменты
+reassemble(fragments):
+    buffer = allocate(total_length)
+    for frag in fragments:
+        buffer[frag.offset:frag.offset+len(frag.data)] = frag.data
+    return buffer
+```
+
+***
+
+## 8. Traffic Morphing Layer (L3) — Обфускация
+
+### 8.1. Packet Size Randomization
+
+```cpp
+// Каждый клиент имеет уникальный profile_seed (32 bytes)
+// Это определяет распределение размеров пакетов
+
+calculate_packet_size(payload_len, seq, profile_seed):
+    // Вычислить псевдослучайное значение
+    h = HMAC_SHA256(profile_seed, "packet_size" || seq)
+    random_class = h[0] % 100
+    
+    // Три класса размеров (40%, 40%, 20%)
+    if random_class < 40:
+        base = payload_len + 80
+        jitter = h[1] % 120
+    elif random_class < 80:
+        base = payload_len + 250
+        jitter = h[2] % 300
+    else:
+        base = payload_len + 600
+        jitter = h[3] % 500
+    
+    final_size = base + jitter
+    padding_needed = final_size - payload_len - overhead
+    
+    return final_size, padding_needed
+```
+
+### 8.2. Timing Jitter (Poisson-like)
+
+```cpp
+// Интервалы между пакетами должны выглядеть естественно
+
+calculate_send_delay(last_send_time, seq, profile_seed):
+    h = HMAC_SHA256(profile_seed, "timing" || seq)
+    
+    // Poisson parameter (среднее время между пакетами)
+    lambda = (h[0:2] % 100) + 10  // 10-110 ms
+    
+    // Exponential distribution (упрощённая Poisson)
+    u = (h[2:4] % 10000) / 10000.0  // uniform [0, 1)
+    delay_ms = -lambda * log(u)
+    
+    // Jitter для избежания паттернов
+    jitter = (h[4:6] % lambda) - lambda / 2
+    final_delay = max(1, delay_ms + jitter)
+    
+    return last_send_time + final_delay / 1000.0
+```
+
+### 8.3. Heartbeat Frames (Fake IoT Telemetry)
+
+```cpp
+// Когда нет реальных данных, отправляем fake sensor data
+
+create_heartbeat():
+    fake_telemetry = {
+        "sensor_id": random_hex(4),
+        "temperature": random_float(0, 50),  // 0-50°C
+        "humidity": random_float(0, 100),    // 0-100%
+        "battery": random_float(0, 100),     // 0-100%
+        "timestamp": unix_time()
+    }
+    
+    // Сериализация в JSON (выглядит как реальный IoT)
+    json_data = serialize_json(fake_telemetry)
+    
+    return build_data_frame(json_data, frame_type=0x04)
+
+// Отправка heartbeat каждые 5-15 секунд (когда idle)
+```
+
+### 8.4. Random Prefix Generation
+
+```cpp
+// Random Prefix скрывает любые паттерны в начале пакета
+
+generate_random_prefix(seq, profile_seed):
+    // Длина префикса: 4..12 байт
+    prefix_len = 4 + (HMAC_SHA256(profile_seed, "prefix" || seq)[0] % 9)
+    
+    // Содержимое префикса: псевдослучайное, но детерминистическое
+    h = HMAC_SHA256(profile_seed, "prefix_content" || seq)
+    prefix_byte = h[0]
+    
+    prefix = repeat(prefix_byte, prefix_len)
+    return prefix
+```
+
+***
+
+## 9. Модули и интерфейсы
+
+### 9.1. Crypto Engine
+
+```cpp
+class CryptoEngine {
+public:
+    // Key exchange
+    KeyPair generate_x25519_keypair();
+    SharedSecret compute_shared_secret(PrivateKey my_key, PublicKey their_key);
+    
+    // Encryption/Decryption
+    EncryptedData encrypt_chacha20_poly1305(
+        Key key,
+        Nonce nonce,
+        Plaintext data,
+        AAD additional_data
+    );
+    
+    Plaintext decrypt_chacha20_poly1305(
+        Key key,
+        Nonce nonce,
+        Ciphertext data,
+        Tag auth_tag,
+        AAD additional_data
+    );
+    
+    // Key derivation
+    DerivedKey hkdf_sha256(InputKey input, InfoString info, size_t output_len);
+    
+    // HMAC
+    Tag hmac_sha256(Key key, Data message);
+};
+```
+
+### 9.2. Packet Builder
+
+```cpp
+class PacketBuilder {
+public:
+    VeilPacket build_handshake_packet(
+        HandshakePayload payload,
+        ProfileSeed seed,
+        uint32_t sequence
+    );
+    
+    VeilPacket build_data_packet(
+        DataPayload payload,
+        SessionKey key,
+        SessionID session_id,
+        uint32_t sequence,
+        ProfileSeed seed
+    );
+    
+    VeilPacket build_heartbeat_packet(
+        SessionKey key,
+        SessionID session_id,
+        ProfileSeed seed
+    );
+    
+private:
+    bytes generate_random_prefix(uint32_t seq, ProfileSeed seed);
+    bytes generate_random_padding(uint32_t seq, ProfileSeed seed, size_t max_len);
+    Nonce compute_nonce(SessionKey key, uint32_t seq, SessionID session_id);
+};
+```
+
+### 9.3. Traffic Morpher
+
+```cpp
+class TrafficMorpher {
+public:
+    // Packet size randomization
+    size_t calculate_packet_size(
+        size_t payload_len,
+        uint32_t sequence,
+        ProfileSeed seed
+    );
+    
+    // Timing jitter
+    Timestamp calculate_next_send_time(
+        Timestamp last_send,
+        uint32_t sequence,
+        ProfileSeed seed
+    );
+    
+    // Heartbeat generation
+    HeartbeatFrame generate_heartbeat(ProfileSeed seed);
+    
+private:
+    size_t random_class_distribution(ProfileSeed seed, uint32_t seq);
+    double exponential_delay(ProfileSeed seed, uint32_t seq);
+};
+```
+
+### 9.4. Session Manager
+
+```cpp
+class SessionManager {
+public:
+    // Session creation
+    SessionID create_session(
+        ClientID client_id,
+        SharedSecret shared_secret,
+        Address client_address
+    );
+    
+    // Session lookup
+    Session* find_session(SessionID session_id);
+    Session* find_session_by_address(Address client_address);
+    
+    // Session maintenance
+    void update_session_activity(SessionID session_id);
+    void rotate_session_keys(SessionID session_id);
+    void cleanup_expired_sessions();
+    
+    // Session removal
+    void remove_session(SessionID session_id);
+    
+private:
+    std::unordered_map<SessionID, Session> sessions_;
+    std::mutex sessions_mutex_;
+};
+```
+
+### 9.5. UDP Socket (Platform Abstraction)
+
+```cpp
+class UDPSocket {
+public:
+    // Initialization
+    bool bind(Address local_address, Port port);
+    bool connect(Address remote_address, Port port);
+    
+    // I/O operations
+    ssize_t send(const bytes& data, Address dest);
+    ssize_t receive(bytes& buffer, Address& sender);
+    
+    // Non-blocking I/O
+    void set_nonblocking(bool enabled);
+    bool poll(int timeout_ms);
+    
+    // Socket options
+    void set_receive_buffer_size(size_t size);
+    void set_send_buffer_size(size_t size);
+    
+private:
+    int socket_fd_;
+    bool is_nonblocking_;
+};
+```
+
+***
+
+## 10. Конфигурационные файлы
+
+### 10.1. Клиентская конфигурация (veil-client.conf)
+
+```ini
+[server]
+address = example.com
+port = 443
+
+[client]
+client_id = 0123456789abcdef0123456789abcdef  # 16 bytes hex
+profile_seed = [автогенерируется при первом запуске]
+
+[crypto]
+cipher_suite = chacha20-poly1305
+protocol_version = 1
+
+[obfuscation]
+max_padding_size = 400
+heartbeat_interval = 10  # seconds
+enable_timing_jitter = true
+
+[transport]
+max_retries = 3
+ack_timeout = 500  # milliseconds
+enable_multiplexing = true
+
+[performance]
+send_buffer_size = 4194304  # 4 MB
+receive_buffer_size = 4194304
+worker_threads = 4
+```
+
+### 10.2. Серверная конфигурация (veil-server.conf)
+
+```ini
+[server]
+listen_address = 0.0.0.0
+listen_port = 443
+
+[crypto]
+server_private_key = [путь к файлу ключа]
+allowed_cipher_suites = chacha20-poly1305
+
+[clients]
+# Список разрешённых клиентов
+# client_id = shared_secret (hex)
+0123456789abcdef0123456789abcdef = fedcba9876543210fedcba9876543210
+
+[security]
+enable_rate_limiting = true
+max_connections_per_ip = 100
+handshake_timeout = 10  # seconds
+session_lifetime = 3600  # seconds
+
+[performance]
+max_sessions = 10000
+worker_threads = 8
+send_buffer_size = 8388608  # 8 MB
+receive_buffer_size = 8388608
+
+[routing]
+enable_nat = true
+default_gateway = auto
+```
+
+***
+
+## 11. Алгоритмы работы
+
+### 11.1. Client Workflow
+
+```
+┌─────────────────────────────────────────────┐
+│ START: veil-client                          │
+└──────────────┬──────────────────────────────┘
+               │
+               ▼
+      ┌────────────────────┐
+      │ Load Configuration │
+      └────────┬───────────┘
+               │
+               ▼
+      ┌─────────────────────┐
+      │ Generate/Load Keys  │
+      └────────┬────────────┘
+               │
+               ▼
+      ┌──────────────────────┐
+      │ Create UDP Socket    │
+      └────────┬─────────────┘
+               │
+               ▼
+      ┌────────────────────────┐
+      │ Send HANDSHAKE to      │
+      │ Server                 │
+      └────────┬───────────────┘
+               │
+               ▼
+      ┌────────────────────────┐
+      │ Wait for INIT_RESPONSE │
+      │ (timeout: 5s)          │
+      └────────┬───────────────┘
+               │
+               ├─[timeout]──────────┐
+               │                    │
+               ▼                    ▼
+      ┌──────────────────┐   ┌────────────┐
+      │ Session          │   │ Retry or   │
+      │ Established      │   │ Exit       │
+      └────────┬─────────┘   └────────────┘
+               │
+               ▼
+      ┌───────────────────────┐
+      │ Main Event Loop:      │
+      │ - Receive user data   │
+      │ - Encrypt & send      │
+      │ - Receive from server │
+      │ - Decrypt & forward   │
+      │ - Send heartbeats     │
+      └───────────────────────┘
+```
+
+### 11.2. Server Workflow
+
+```
+┌─────────────────────────────────────────────┐
+│ START: veil-server                          │
+└──────────────┬──────────────────────────────┘
+               │
+               ▼
+      ┌────────────────────┐
+      │ Load Configuration │
+      └────────┬───────────┘
+               │
+               ▼
+      ┌─────────────────────┐
+      │ Load Server Keys    │
+      └────────┬────────────┘
+               │
+               ▼
+      ┌──────────────────────┐
+      │ Bind UDP Socket      │
+      │ (port 443)           │
+      └────────┬─────────────┘
+               │
+               ▼
+      ┌───────────────────────────────┐
+      │ Start Worker Threads          │
+      │ - Packet receiver             │
+      │ - Packet sender               │
+      │ - Session manager             │
+      │ - Route forwarder             │
+      └────────┬──────────────────────┘
+               │
+               ▼
+      ┌────────────────────────────────┐
+      │ Main Event Loop:               │
+      │                                │
+      │ FOR EACH received packet:      │
+      │   ├─ Try decrypt handshake     │
+      │   ├─ Validate auth_token       │
+      │   ├─ Create/Update session     │
+      │   ├─ Route data to internet    │
+      │   └─ Send response             │
+      │                                │
+      │ Periodic tasks:                │
+      │   ├─ Rotate session keys       │
+      │   ├─ Cleanup expired sessions  │
+      │   └─ Log statistics            │
+      └────────────────────────────────┘
+```
+
+***
+
+## 12. Тестирование и валидация
+
+### 12.1. Unit Tests
+
+```
+Модуль                      | Тесты
+----------------------------|------------------------------------------
+CryptoEngine               | - X25519 key exchange корректность
+                           | - ChaCha20-Poly1305 encrypt/decrypt
+                           | - HKDF derivation
+                           | - HMAC вычисление
+                           |
+PacketBuilder              | - Формирование HANDSHAKE пакета
+                           | - Формирование DATA пакета
+                           | - Random Prefix корректность
+                           | - Padding корректность
+                           |
+TrafficMorpher             | - Packet size distribution
+                           | - Timing jitter calculations
+                           | - Heartbeat generation
+                           |
+SessionManager             | - Создание сессий
+                           | - Поиск сессий
+                           | - Ротация ключей
+                           | - Cleanup expired sessions
+```
+
+### 12.2. Integration Tests
+
+```
+Сценарий                    | Описание
+----------------------------|------------------------------------------
+Basic Connectivity         | Клиент устанавливает соединение с сервером
+Data Transfer              | Передача 1GB данных через VEIL
+Reconnection               | Клиент переподключается после потери связи
+Multiple Clients           | 100+ клиентов одновременно
+Packet Loss                | Работа при 10% loss rate
+High Latency               | Работа при RTT 500ms
+Active Probing             | Сервер игнорирует поддельные пакеты
+Rate Limiting              | Защита от flooding
+```
+
+### 12.3. DPI Detection Tests
+
+```
+Инструмент                  | Цель
+----------------------------|------------------------------------------
+nDPI                       | Проверка, что протокол классифицируется как
+                           | "Unknown" или "IoT"
+                           |
+Wireshark + ML plugin      | Визуальный анализ трафика
+                           |
+Custom ML Classifier       | Random Forest классификатор на flow metrics:
+                           | - packet_size_mean/std
+                           | - inter_arrival_time_mean/std
+                           | - directional_byte_ratio
+                           | - entropy
+                           |
+Active Probe Simulator     | Отправка поддельных HANDSHAKE пакетов
+                           | Проверка, что сервер не отвечает
+```
+
+***
+
+## 13. Требования к библиотекам
+
+на твой выбор
+
+***
+
+## 14. Этапы разработки
+
+### Этап 1: Прототип (2-3 недели)
+- Реализовать базовый CryptoEngine (X25519 + ChaCha20-Poly1305)
+- Реализовать PacketBuilder (без обфускации)
+- Реализовать простой handshake (client/server)
+- Проверить работоспособность на localhost
+
+### Этап 2: Transport Layer (1-2 недели)
+- Добавить multiplexing streams
+- Реализовать selective retransmission
+- Реализовать fragment reassembly
+
+### Этап 3: Obfuscation (2-3 недели)
+- Реализовать TrafficMorpher
+- Добавить packet size randomization
+- Добавить timing jitter
+- Реализовать heartbeat frames
+
+### Этап 4: Production Hardening (2-3 недели)
+- Добавить session management
+- Реализовать rate limiting
+- Добавить логирование и мониторинг
+- Провести security audit
+
+### Этап 5: Testing & Validation (1-2 недели)
+- Unit tests для всех модулей
+- Integration tests
+- DPI detection tests (nDPI, custom ML)
+- Performance benchmarks
+
+### Этап 6: Deployment (1 неделя)
+- Создать установочные пакеты
+- Написать документацию
+- Развернуть beta-версию на тестовом сервере
+
+***
+
+## 15. Метрики успеха
+
+### 15.1. Производительность
+- **Throughput**: >= 500 Mbps на ryzen 5 5600 (без AES-NI)
+- **Latency**: handshake <= 150 ms (при RTT 50 ms)
+- **Memory**: <= 50 MB на 1000 соединений
+- **CPU usage**: <= 30% при 100 Mbps трафике
+
+### 15.2. Безопасность
+- **DPI evasion**: nDPI не классифицирует как VPN
+- **ML evasion**: Random Forest классификатор <= 60% accuracy
+- **Active probing**: Сервер не отвечает на поддельные пакеты
+- **Replay protection**: 100% защита от replay attacks
+
+### 15.3. Надёжность
+- **Packet loss recovery**: Работа при 10% loss rate
+- **Reconnection time**: <= 5 секунд после разрыва
+- **Session persistence**: 1+ час без разрывов
+
+***
+
+## 16. Риски и митигация
+
+| Риск | Вероятность | Влияние | Митигация |
+|------|-------------|---------|-----------|
+| DPI научится обнаруживать VEIL через 6-12 месяцев | Высокая | Критическое | Подготовить систему быстрого обновления protocol parameters (profile seeds, distributions) |
+| Производительность ниже ожидаемой | Средняя | Среднее | Провести benchmarking на раннем этапе, оптимизировать hot paths |
+| Уязвимости в криптографии | Низкая | Критическое | Использовать только проверенные библиотеки, провести security audit |
+| Active probing обнаружит сервер | Средняя | Высокое | Улучшить anti-probing механизм, добавить port knocking |
+
+***
+
+## 17. Заключение
+
+Данное ТЗ описывает полноценную архитектуру VPN-протокола **VEIL**, который:
+
+✅ Радикально отличается от WireGuard, TLS, Shadowsocks, VLESS  
+✅ Не имеет статических сигнатур  
+✅ Маскируется под IoT-трафик  
+✅ Защищён от активного probing  
+✅ Криптографически обоснован  
+✅ Реализуем на C++ в течение 2-3 месяцев  
+
+Протокол готов к реализации и тестированию.
+
+[1](https://implementationscience.biomedcentral.com/articles/10.1186/s13012-022-01246-z)
+[2](https://www.mdpi.com/2227-9032/11/23/3080)
+[3](https://journals.lww.com/10.1097/XEB.0000000000000469)
+[4](https://www.semanticscholar.org/paper/b8960e82c43f6d0574a03765fd6b2160e07e71f6)
+[5](https://implementationsciencecomms.biomedcentral.com/articles/10.1186/s43058-023-00431-5)
+[6](https://journals.lww.com/10.1097/XEB.0000000000000276)
+[7](https://www.rfc-editor.org/info/rfc8633)
+[8](https://implementationscience.biomedcentral.com/articles/10.1186/s13012-024-01355-x)
+[9](https://journals.lww.com/10.1097/XEB.0000000000000352)
+[10](https://journals.lww.com/10.1097/XEB.0000000000000505)
+[11](http://arxiv.org/pdf/1311.3336.pdf)
+[12](http://arxiv.org/pdf/0908.1564.pdf)
+[13](https://arxiv.org/pdf/2405.01279.pdf)
+[14](https://arxiv.org/pdf/1212.1929.pdf)
+[15](https://arxiv.org/pdf/2105.10486.pdf)
+[16](https://arxiv.org/pdf/1405.7143.pdf)
+[17](http://arxiv.org/pdf/2404.05610.pdf)
+[18](https://dl.acm.org/doi/pdf/10.1145/3656396)
+[19](https://commschamp.github.io/comms_protocols_cpp/)
+[20](https://stackoverflow.com/questions/6389544/c-network-multi-application-protocols)
+[21](https://www.youtube.com/watch?v=AS_nxNS6YKY)
+[22](https://dev.to/arobenko/implement-binary-communication-protocols-in-c-3cje)
+[23](https://mrebi.com/en/c-plus-plus/cpp-networking/)
+[24](https://fasterdata.es.net/host-tuning/linux/udp-tuning/)
+[25](https://www.cryptopp.com/wiki/ChaCha20Poly1305)
+[26](https://www.embedded.com/efficiently-coding-communications-protocols-in-c/)
+[27](https://subspace.com/resources/tune-tcp-udp-performance)
+[28](https://samuellucas.com/Cryptography-Guidelines/)
+[29](https://www.linkedin.com/advice/0/what-best-way-implement-communication-protocol-5itte)
+[30](https://www.tencentcloud.com/techpedia/103162)
+[31](https://en.wikipedia.org/wiki/ChaCha20-Poly1305)
+[32](https://www.reddit.com/r/cpp_questions/comments/10lw7ad/learning_to_build_networking_applications_using/)
+[33](https://www.reddit.com/r/C_Programming/comments/1j7fxu7/what_is_the_best_library_for_fast_socket_listener/)
+[34](https://ssojet.com/compare-encryption-algorithms/aes-128-vs-chacha20-256/)
+[35](https://mfreiholz.de/posts/network-protocol-parser/)
+[36](https://stackoverflow.com/questions/3309854/maximizing-performance-on-udp)
+[37](https://github.com/mrdcvlsc/ChaCha20-Poly1305)
+[38](https://www.reddit.com/r/cpp/comments/d4hgfu/the_correct_approach_in_building_network/)
+[39](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/10/html/network_troubleshooting_and_performance_tuning/tuning-udp-connections)
+[40](https://en.wikipedia.org/wiki/Comparison_of_cryptography_libraries)

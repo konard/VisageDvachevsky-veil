@@ -1,0 +1,144 @@
+# VEIL Server Configuration
+# Copy this file to /etc/veil/server.conf and modify as needed
+
+[server]
+# Listen address and port
+listen_address = 0.0.0.0
+listen_port = 4433
+
+# Run as daemon
+daemon = false
+
+# Enable verbose logging
+verbose = false
+
+[tun]
+# TUN device settings
+device_name = veil0
+ip_address = 10.8.0.1
+netmask = 255.255.255.0
+mtu = 1400
+
+[crypto]
+# Pre-shared key file (32 bytes, binary)
+# Generate with: head -c 32 /dev/urandom > /etc/veil/server.key
+preshared_key_file = /etc/veil/server.key
+
+[obfuscation]
+# Obfuscation profile seed file (32 bytes, binary)
+# Must match client configuration
+# Generate with: head -c 32 /dev/urandom > /etc/veil/obfuscation.seed
+profile_seed_file = /etc/veil/obfuscation.seed
+
+[nat]
+# External interface for NAT (internet-facing interface)
+external_interface = eth0
+
+# Enable IP forwarding and NAT
+enable_forwarding = true
+
+# Use MASQUERADE (true) or SNAT (false)
+use_masquerade = true
+
+# SNAT source IP (only used if use_masquerade = false)
+# snat_source = 203.0.113.1
+
+[sessions]
+# Maximum number of concurrent clients
+max_clients = 256
+
+# Session timeout (seconds of inactivity before disconnect)
+session_timeout = 300
+
+# Idle warning before timeout (sends notification to client)
+idle_warning_sec = 270
+
+# Absolute session timeout (maximum lifetime regardless of activity)
+absolute_timeout_sec = 86400
+
+# Maximum memory per session (bytes)
+max_memory_per_session_mb = 10
+
+# Session cleanup interval (seconds)
+cleanup_interval = 60
+
+# Drain timeout for graceful shutdown (seconds)
+drain_timeout_sec = 5
+
+[ip_pool]
+# IP address pool for clients
+start = 10.8.0.2
+end = 10.8.0.254
+
+[daemon]
+# PID file location
+pid_file = /var/run/veil-server.pid
+
+# Log file (if empty, logs to syslog/stdout)
+# log_file = /var/log/veil-server.log
+
+# Drop privileges to this user/group after startup
+# (Note: Must open TUN and configure NAT before dropping privileges)
+# user = nobody
+# group = nogroup
+
+[rate_limiting]
+# Per-client bandwidth limit (megabits per second)
+per_client_bandwidth_mbps = 100
+
+# Per-client packets per second limit
+per_client_pps = 10000
+
+# Burst allowance factor (1.0 = no burst, 1.5 = allow 50% burst)
+burst_allowance_factor = 1.5
+
+# Maximum reconnections per minute before anti-abuse triggers
+reconnect_limit_per_minute = 5
+
+# Enable traffic priority (critical/high/normal/low)
+enable_traffic_shaping = true
+
+[degradation]
+# CPU usage threshold for moderate degradation (percent)
+cpu_threshold_percent = 80
+
+# Memory usage threshold for degradation (percent)
+memory_threshold_percent = 85
+
+# Enable automatic graceful degradation under load
+enable_graceful_degradation = true
+
+# Escalation delay before increasing degradation level (seconds)
+escalation_delay_sec = 5
+
+# Recovery delay before decreasing degradation level (seconds)
+recovery_delay_sec = 10
+
+[logging]
+# Log level: trace, debug, info, warn, error, critical
+level = info
+
+# Maximum log entries per second (0 = unlimited)
+rate_limit_logs_per_sec = 100
+
+# Sampling rate for routine events (0.0 to 1.0, 1.0 = log all)
+sampling_rate = 0.01
+
+# Enable async logging (recommended for production)
+async_logging = true
+
+# Enable structured JSON logging
+format = json
+
+[migration]
+# Enable session migration (allows clients to change IP without reconnect)
+enable_session_migration = true
+
+# Migration token time-to-live (seconds)
+migration_token_ttl_sec = 300
+
+# Maximum migrations per session
+max_migrations_per_session = 5
+
+# Minimum time between migrations (seconds)
+migration_cooldown_sec = 10

@@ -1,0 +1,59 @@
+# VEIL Client Configuration
+# Copy this file to /etc/veil/client.conf and modify as needed
+
+[client]
+# Server to connect to
+server_address = vpn.example.com
+server_port = 4433
+
+# Run as daemon
+daemon = false
+
+# Enable verbose logging
+verbose = false
+
+[tun]
+# TUN device settings
+device_name = veil0
+ip_address = 10.8.0.2
+netmask = 255.255.255.0
+mtu = 1400
+
+[crypto]
+# Pre-shared key file (32 bytes, binary)
+# Generate with: head -c 32 /dev/urandom > /etc/veil/client.key
+preshared_key_file = /etc/veil/client.key
+
+[obfuscation]
+# Obfuscation profile seed file (32 bytes, binary)
+# Must match server configuration
+# Generate with: head -c 32 /dev/urandom > /etc/veil/obfuscation.seed
+profile_seed_file = /etc/veil/obfuscation.seed
+
+[routing]
+# Set this tunnel as default route (route all traffic through VPN)
+default_route = false
+
+# Additional routes to add (comma-separated, CIDR notation)
+# routes = 192.168.1.0/24, 10.0.0.0/8
+
+[connection]
+# Auto-reconnect on connection loss
+auto_reconnect = true
+
+# Delay between reconnection attempts (milliseconds)
+reconnect_interval_ms = 5000
+
+# Maximum reconnection attempts (0 = unlimited)
+# max_reconnect_attempts = 0
+
+[daemon]
+# PID file location
+pid_file = /var/run/veil-client.pid
+
+# Log file (if empty, logs to syslog/stdout)
+# log_file = /var/log/veil-client.log
+
+# Drop privileges to this user/group after startup
+# user = nobody
+# group = nogroup
