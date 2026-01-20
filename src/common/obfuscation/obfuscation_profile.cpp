@@ -163,18 +163,124 @@ std::uint16_t compute_timing_jitter(const ObfuscationProfile& profile, std::uint
 
 std::chrono::milliseconds compute_heartbeat_interval(const ObfuscationProfile& profile,
                                                       std::uint64_t heartbeat_count) {
-  const auto min_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(profile.heartbeat_min).count();
-  const auto max_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(profile.heartbeat_max).count();
+  switch (profile.heartbeat_timing_model) {
+    case HeartbeatTimingModel::kUniform: {
+      // Original uniform random distribution.
+      const auto min_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(profile.heartbeat_min).count();
+      const auto max_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(profile.heartbeat_max).count();
 
-  if (min_ms >= max_ms) {
-    return std::chrono::milliseconds(min_ms);
+      if (min_ms >= max_ms) {
+        return std::chrono::milliseconds(min_ms);
+      }
+
+      const auto value = derive_value(profile.profile_seed, heartbeat_count, "heartbeat");
+      const auto range = static_cast<std::uint64_t>(max_ms - min_ms + 1);
+      return std::chrono::milliseconds(min_ms + static_cast<long long>(value % range));
+    }
+
+    case HeartbeatTimingModel::kExponential:
+      return compute_heartbeat_interval_exponential(profile, heartbeat_count);
+
+    case HeartbeatTimingModel::kBurst: {
+      bool is_burst_start = false;
+      return compute_heartbeat_interval_burst(profile, heartbeat_count, is_burst_start);
+    }
+
+    default:
+      // Fallback to uniform.
+      const auto min_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(profile.heartbeat_min).count();
+      return std::chrono::milliseconds(min_ms);
+  }
+}
+
+std::chrono::milliseconds compute_heartbeat_interval_exponential(const ObfuscationProfile& profile,
+                                                                  std::uint64_t heartbeat_count) {
+  // Use exponential distribution with occasional long gaps.
+  // This creates chaotic, non-periodic timing that resists statistical analysis.
+
+  // Derive two random values: one for the base interval, one for long gap decision.
+  const auto base_value = derive_value(profile.profile_seed, heartbeat_count, "hb_exp");
+  const auto gap_value = derive_value(profile.profile_seed, heartbeat_count, "hb_gap");
+
+  // Normalize base_value to [0, 1).
+  const auto normalized = static_cast<double>(base_value) / static_cast<double>(UINT64_MAX);
+
+  // Check if this should be a long gap (based on probability).
+  const auto gap_normalized = static_cast<double>(gap_value % 10000) / 10000.0;
+  const bool use_long_gap = gap_normalized < static_cast<double>(profile.exponential_long_gap_probability);
+
+  if (use_long_gap) {
+    // Occasional long gap: uniform random in [mean, max_gap].
+    const auto mean_ms = static_cast<long long>(profile.exponential_mean_seconds * 1000.0f);
+    const auto max_gap_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(profile.exponential_max_gap).count();
+
+    if (mean_ms >= max_gap_ms) {
+      return std::chrono::milliseconds(max_gap_ms);
+    }
+
+    const auto range = static_cast<std::uint64_t>(max_gap_ms - mean_ms + 1);
+    const auto offset = base_value % range;
+    return std::chrono::milliseconds(mean_ms + static_cast<long long>(offset));
   }
 
-  const auto value = derive_value(profile.profile_seed, heartbeat_count, "heartbeat");
-  const auto range = static_cast<std::uint64_t>(max_ms - min_ms + 1);
-  return std::chrono::milliseconds(min_ms + static_cast<long long>(value % range));
+  // Normal case: use exponential distribution.
+  // Exponential CDF: F(x) = 1 - e^(-x/mean)
+  // Inverse: x = -mean * ln(1 - U)
+  const auto mean_ms = static_cast<double>(profile.exponential_mean_seconds * 1000.0f);
+  const auto clamped = std::max(normalized, 1e-10);  // Avoid log(0).
+  auto interval_ms = -mean_ms * std::log(1.0 - clamped);
+
+  // Cap at a reasonable maximum (3x mean) to avoid extremely long waits.
+  const auto cap_ms = mean_ms * 3.0;
+  interval_ms = std::min(interval_ms, cap_ms);
+
+  // Ensure minimum of 1 second to avoid too-frequent heartbeats.
+  interval_ms = std::max(interval_ms, 1000.0);
+
+  return std::chrono::milliseconds(static_cast<long long>(interval_ms));
+}
+
+std::chrono::milliseconds compute_heartbeat_interval_burst(const ObfuscationProfile& profile,
+                                                            std::uint64_t heartbeat_count,
+                                                            bool& is_burst_start) {
+  // Burst mode: Send N heartbeats quickly, then go silent for a long period.
+  // This breaks up regular timing patterns.
+
+  // Determine burst size for this cycle.
+  const auto burst_value = derive_value(profile.profile_seed, heartbeat_count / 100, "hb_burst_sz");
+  const auto burst_range = static_cast<std::uint8_t>(
+      profile.burst_heartbeat_count_max - profile.burst_heartbeat_count_min + 1);
+  const auto burst_size = profile.burst_heartbeat_count_min +
+                          static_cast<std::uint8_t>(burst_value % burst_range);
+
+  // Determine position within the burst cycle.
+  const auto burst_size_u64 = static_cast<std::uint64_t>(burst_size);
+  const auto position_in_cycle = heartbeat_count % (burst_size_u64 + 1);
+
+  if (position_in_cycle < burst_size_u64) {
+    // We're in a burst - send heartbeats quickly.
+    is_burst_start = (position_in_cycle == 0);
+    return profile.burst_interval;
+  } else {
+    // We're between bursts - long silence.
+    is_burst_start = false;
+    const auto silence_value = derive_value(profile.profile_seed, heartbeat_count, "hb_silence");
+    const auto silence_min_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(profile.burst_silence_min).count();
+    const auto silence_max_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(profile.burst_silence_max).count();
+
+    if (silence_min_ms >= silence_max_ms) {
+      return std::chrono::milliseconds(silence_min_ms);
+    }
+
+    const auto range = static_cast<std::uint64_t>(silence_max_ms - silence_min_ms + 1);
+    return std::chrono::milliseconds(silence_min_ms + static_cast<long long>(silence_value % range));
+  }
 }
 
 PaddingSizeClass compute_padding_class(const ObfuscationProfile& profile, std::uint64_t sequence) {
@@ -449,9 +555,260 @@ std::vector<std::uint8_t> generate_heartbeat_payload(const ObfuscationProfile& p
 
     case HeartbeatType::kGenericTelemetry:
       return generate_telemetry_heartbeat_payload(profile, heartbeat_sequence);
+
+    case HeartbeatType::kRandomSize:
+      return generate_random_size_heartbeat_payload(profile, heartbeat_sequence);
+
+    case HeartbeatType::kMimicDNS:
+      return generate_dns_mimic_heartbeat_payload(profile, heartbeat_sequence);
+
+    case HeartbeatType::kMimicSTUN:
+      return generate_stun_mimic_heartbeat_payload(profile, heartbeat_sequence);
+
+    case HeartbeatType::kMimicRTP:
+      return generate_rtp_mimic_heartbeat_payload(profile, heartbeat_sequence);
   }
 
   return {};
+}
+
+std::vector<std::uint8_t> generate_random_size_heartbeat_payload(const ObfuscationProfile& profile,
+                                                                  std::uint64_t heartbeat_sequence) {
+  // Generate payload with random size between 8 and 200 bytes.
+  // This defeats size-based pattern detection.
+
+  const auto size_value = derive_value(profile.profile_seed, heartbeat_sequence, "hb_rand_sz");
+  const auto size = 8 + static_cast<std::size_t>(size_value % (200 - 8 + 1));
+
+  std::vector<std::uint8_t> payload;
+  payload.reserve(size);
+
+  // Fill with pseudo-random data based on seed.
+  for (std::size_t i = 0; i < size; ++i) {
+    const auto byte_value = derive_value(profile.profile_seed, heartbeat_sequence + i, "hb_rand_b");
+    payload.push_back(static_cast<std::uint8_t>(byte_value & 0xFF));
+  }
+
+  return payload;
+}
+
+std::vector<std::uint8_t> generate_dns_mimic_heartbeat_payload(const ObfuscationProfile& profile,
+                                                                std::uint64_t heartbeat_sequence) {
+  // Mimic DNS response structure (simplified).
+  // Real DNS responses have:
+  // - 12 byte header
+  // - Question section
+  // - Answer section (variable)
+  //
+  // We'll create a minimal response-like structure.
+
+  std::vector<std::uint8_t> payload;
+  payload.reserve(64);
+
+  // DNS Header (12 bytes).
+  // Transaction ID (2 bytes).
+  const auto txid = static_cast<std::uint16_t>(
+      derive_value(profile.profile_seed, heartbeat_sequence, "dns_txid") & 0xFFFF);
+  payload.push_back(static_cast<std::uint8_t>((txid >> 8) & 0xFF));
+  payload.push_back(static_cast<std::uint8_t>(txid & 0xFF));
+
+  // Flags (2 bytes): Standard query response, no error.
+  payload.push_back(0x81);  // QR=1, Opcode=0, AA=0, TC=0, RD=1
+  payload.push_back(0x80);  // RA=1, Z=0, RCODE=0
+
+  // QDCOUNT (2 bytes): 1 question.
+  payload.push_back(0x00);
+  payload.push_back(0x01);
+
+  // ANCOUNT (2 bytes): 1 answer.
+  payload.push_back(0x00);
+  payload.push_back(0x01);
+
+  // NSCOUNT, ARCOUNT (4 bytes): 0.
+  payload.push_back(0x00);
+  payload.push_back(0x00);
+  payload.push_back(0x00);
+  payload.push_back(0x00);
+
+  // Question section (variable, we'll use ~20 bytes for a simple domain).
+  // Format: <length>label<length>label...<0> <type> <class>
+  // Example: "\x07example\x03com\x00" for "example.com"
+  payload.push_back(0x07);  // Length of "example"
+  for (char c : std::string("example")) {
+    payload.push_back(static_cast<std::uint8_t>(c));
+  }
+  payload.push_back(0x03);  // Length of "com"
+  for (char c : std::string("com")) {
+    payload.push_back(static_cast<std::uint8_t>(c));
+  }
+  payload.push_back(0x00);  // End of domain name
+
+  // QTYPE (2 bytes): A record (0x0001).
+  payload.push_back(0x00);
+  payload.push_back(0x01);
+
+  // QCLASS (2 bytes): IN (0x0001).
+  payload.push_back(0x00);
+  payload.push_back(0x01);
+
+  // Answer section (variable, we'll add a simple A record).
+  // Name (2 bytes): Pointer to question name (compression).
+  payload.push_back(0xC0);
+  payload.push_back(0x0C);
+
+  // TYPE (2 bytes): A.
+  payload.push_back(0x00);
+  payload.push_back(0x01);
+
+  // CLASS (2 bytes): IN.
+  payload.push_back(0x00);
+  payload.push_back(0x01);
+
+  // TTL (4 bytes): Random TTL.
+  const auto ttl = static_cast<std::uint32_t>(
+      derive_value(profile.profile_seed, heartbeat_sequence, "dns_ttl") & 0xFFFFFFFF);
+  payload.push_back(static_cast<std::uint8_t>((ttl >> 24) & 0xFF));
+  payload.push_back(static_cast<std::uint8_t>((ttl >> 16) & 0xFF));
+  payload.push_back(static_cast<std::uint8_t>((ttl >> 8) & 0xFF));
+  payload.push_back(static_cast<std::uint8_t>(ttl & 0xFF));
+
+  // RDLENGTH (2 bytes): 4 (IPv4 address).
+  payload.push_back(0x00);
+  payload.push_back(0x04);
+
+  // RDATA (4 bytes): Random IP address.
+  const auto ip = static_cast<std::uint32_t>(
+      derive_value(profile.profile_seed, heartbeat_sequence, "dns_ip") & 0xFFFFFFFF);
+  payload.push_back(static_cast<std::uint8_t>((ip >> 24) & 0xFF));
+  payload.push_back(static_cast<std::uint8_t>((ip >> 16) & 0xFF));
+  payload.push_back(static_cast<std::uint8_t>((ip >> 8) & 0xFF));
+  payload.push_back(static_cast<std::uint8_t>(ip & 0xFF));
+
+  return payload;
+}
+
+std::vector<std::uint8_t> generate_stun_mimic_heartbeat_payload(const ObfuscationProfile& profile,
+                                                                 std::uint64_t heartbeat_sequence) {
+  // Mimic STUN Binding Response structure.
+  // STUN message format (RFC 5389):
+  // - 20 byte header
+  // - Attributes (variable)
+  //
+  // Header format:
+  // 0-1: Message Type (0x0101 = Binding Response Success)
+  // 2-3: Message Length (payload length, excluding 20-byte header)
+  // 4-7: Magic Cookie (0x2112A442)
+  // 8-19: Transaction ID (96 bits)
+
+  std::vector<std::uint8_t> payload;
+  payload.reserve(48);
+
+  // Message Type (2 bytes): Binding Response Success (0x0101).
+  payload.push_back(0x01);
+  payload.push_back(0x01);
+
+  // Message Length (2 bytes): Will be filled at the end.
+  const auto length_pos = payload.size();
+  payload.push_back(0x00);
+  payload.push_back(0x00);
+
+  // Magic Cookie (4 bytes): 0x2112A442.
+  payload.push_back(0x21);
+  payload.push_back(0x12);
+  payload.push_back(0xA4);
+  payload.push_back(0x42);
+
+  // Transaction ID (12 bytes): Random.
+  const auto txid1 = derive_value(profile.profile_seed, heartbeat_sequence, "stun_tx1");
+  const auto txid2 = derive_value(profile.profile_seed, heartbeat_sequence, "stun_tx2");
+  for (int i = 7; i >= 0; --i) {
+    payload.push_back(static_cast<std::uint8_t>((txid1 >> (8 * i)) & 0xFF));
+  }
+  for (int i = 3; i >= 0; --i) {
+    payload.push_back(static_cast<std::uint8_t>((txid2 >> (8 * i)) & 0xFF));
+  }
+
+  // Add XOR-MAPPED-ADDRESS attribute (8 bytes total: 4 header + 4 data).
+  // Type (2 bytes): 0x0020 (XOR-MAPPED-ADDRESS).
+  payload.push_back(0x00);
+  payload.push_back(0x20);
+
+  // Length (2 bytes): 8 (family + port + address).
+  payload.push_back(0x00);
+  payload.push_back(0x08);
+
+  // Family (1 byte): 0x01 (IPv4).
+  payload.push_back(0x01);
+
+  // X-Port (2 bytes): Port XORed with magic cookie high 16 bits.
+  const auto port = static_cast<std::uint16_t>(
+      derive_value(profile.profile_seed, heartbeat_sequence, "stun_port") & 0xFFFF);
+  const auto xport = port ^ 0x2112;
+  payload.push_back(static_cast<std::uint8_t>((xport >> 8) & 0xFF));
+  payload.push_back(static_cast<std::uint8_t>(xport & 0xFF));
+
+  // X-Address (4 bytes): IP XORed with magic cookie.
+  const auto ip = static_cast<std::uint32_t>(
+      derive_value(profile.profile_seed, heartbeat_sequence, "stun_ip") & 0xFFFFFFFF);
+  const auto xip = ip ^ 0x2112A442;
+  payload.push_back(static_cast<std::uint8_t>((xip >> 24) & 0xFF));
+  payload.push_back(static_cast<std::uint8_t>((xip >> 16) & 0xFF));
+  payload.push_back(static_cast<std::uint8_t>((xip >> 8) & 0xFF));
+  payload.push_back(static_cast<std::uint8_t>(xip & 0xFF));
+
+  // Padding (1 byte) to align to 4-byte boundary.
+  payload.push_back(0x00);
+
+  // Update message length (payload size - 20 byte header).
+  const auto msg_length = static_cast<std::uint16_t>(payload.size() - 20);
+  payload[length_pos] = static_cast<std::uint8_t>((msg_length >> 8) & 0xFF);
+  payload[length_pos + 1] = static_cast<std::uint8_t>(msg_length & 0xFF);
+
+  return payload;
+}
+
+std::vector<std::uint8_t> generate_rtp_mimic_heartbeat_payload(const ObfuscationProfile& profile,
+                                                                std::uint64_t heartbeat_sequence) {
+  // Mimic RTP (Real-time Transport Protocol) keepalive packet.
+  // RTP header is 12 bytes minimum.
+  // Format (RFC 3550):
+  // 0: V(2) P(1) X(1) CC(4)
+  // 1: M(1) PT(7)
+  // 2-3: Sequence number
+  // 4-7: Timestamp
+  // 8-11: SSRC
+
+  std::vector<std::uint8_t> payload;
+  payload.reserve(12);
+
+  // V=2, P=0, X=0, CC=0.
+  payload.push_back(0x80);
+
+  // M=0, PT=96 (dynamic payload type, common for custom codecs).
+  payload.push_back(96);
+
+  // Sequence number (2 bytes).
+  const auto seq = static_cast<std::uint16_t>(heartbeat_sequence & 0xFFFF);
+  payload.push_back(static_cast<std::uint8_t>((seq >> 8) & 0xFF));
+  payload.push_back(static_cast<std::uint8_t>(seq & 0xFF));
+
+  // Timestamp (4 bytes): Deterministic based on sequence.
+  const auto ts = static_cast<std::uint32_t>(
+      derive_value(profile.profile_seed, heartbeat_sequence, "rtp_ts") & 0xFFFFFFFF);
+  payload.push_back(static_cast<std::uint8_t>((ts >> 24) & 0xFF));
+  payload.push_back(static_cast<std::uint8_t>((ts >> 16) & 0xFF));
+  payload.push_back(static_cast<std::uint8_t>((ts >> 8) & 0xFF));
+  payload.push_back(static_cast<std::uint8_t>(ts & 0xFF));
+
+  // SSRC (4 bytes): Synchronization source identifier.
+  const auto ssrc = static_cast<std::uint32_t>(
+      derive_value(profile.profile_seed, heartbeat_sequence, "rtp_ssrc") & 0xFFFFFFFF);
+  payload.push_back(static_cast<std::uint8_t>((ssrc >> 24) & 0xFF));
+  payload.push_back(static_cast<std::uint8_t>((ssrc >> 16) & 0xFF));
+  payload.push_back(static_cast<std::uint8_t>((ssrc >> 8) & 0xFF));
+  payload.push_back(static_cast<std::uint8_t>(ssrc & 0xFF));
+
+  return payload;
 }
 
 void apply_entropy_normalization(std::vector<std::uint8_t>& buffer,
@@ -606,6 +963,10 @@ ObfuscationProfile create_dpi_mode_profile(DPIBypassMode mode) {
       profile.timing_jitter_model = TimingJitterModel::kPoisson;
       profile.timing_jitter_scale = 0.8f;
       profile.heartbeat_type = HeartbeatType::kIoTSensor;
+      profile.heartbeat_timing_model = HeartbeatTimingModel::kExponential;  // Non-periodic timing
+      profile.exponential_mean_seconds = 15.0f;
+      profile.exponential_max_gap = 60s;
+      profile.exponential_long_gap_probability = 0.15f;
       profile.heartbeat_entropy_normalization = true;
       return profile;
     }
@@ -638,7 +999,11 @@ ObfuscationProfile create_dpi_mode_profile(DPIBypassMode mode) {
       profile.use_advanced_padding = true;
       profile.timing_jitter_model = TimingJitterModel::kExponential;  // Bursty timing
       profile.timing_jitter_scale = 1.5f;
-      profile.heartbeat_type = HeartbeatType::kGenericTelemetry;
+      profile.heartbeat_type = HeartbeatType::kRandomSize;  // Varied payload sizes
+      profile.heartbeat_timing_model = HeartbeatTimingModel::kExponential;
+      profile.exponential_mean_seconds = 45.0f;
+      profile.exponential_max_gap = 180s;
+      profile.exponential_long_gap_probability = 0.2f;
       profile.heartbeat_entropy_normalization = true;
       return profile;
     }
@@ -671,7 +1036,13 @@ ObfuscationProfile create_dpi_mode_profile(DPIBypassMode mode) {
       profile.use_advanced_padding = true;
       profile.timing_jitter_model = TimingJitterModel::kUniform;  // Random timing
       profile.timing_jitter_scale = 2.0f;                         // Maximum jitter scale
-      profile.heartbeat_type = HeartbeatType::kEmpty;             // Minimal heartbeats
+      profile.heartbeat_type = HeartbeatType::kRandomSize;        // Varied payload sizes
+      profile.heartbeat_timing_model = HeartbeatTimingModel::kBurst;  // Burst mode for unpredictability
+      profile.burst_heartbeat_count_min = 2;
+      profile.burst_heartbeat_count_max = 4;
+      profile.burst_silence_min = 90s;
+      profile.burst_silence_max = 240s;
+      profile.burst_interval = 500ms;
       profile.heartbeat_entropy_normalization = true;
       return profile;
     }
@@ -704,7 +1075,11 @@ ObfuscationProfile create_dpi_mode_profile(DPIBypassMode mode) {
       profile.use_advanced_padding = true;
       profile.timing_jitter_model = TimingJitterModel::kPoisson;
       profile.timing_jitter_scale = 1.2f;
-      profile.heartbeat_type = HeartbeatType::kTimestamp;  // Minimal heartbeat data
+      profile.heartbeat_type = HeartbeatType::kMimicDNS;  // DNS-like heartbeats (common background traffic)
+      profile.heartbeat_timing_model = HeartbeatTimingModel::kExponential;
+      profile.exponential_mean_seconds = 180.0f;  // Very infrequent
+      profile.exponential_max_gap = 600s;  // Up to 10 minutes
+      profile.exponential_long_gap_probability = 0.3f;
       profile.heartbeat_entropy_normalization = false;     // Low entropy for IoT-like traffic
       return profile;
     }

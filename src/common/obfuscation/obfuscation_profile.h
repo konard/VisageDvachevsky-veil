@@ -44,12 +44,23 @@ enum class TimingJitterModel : std::uint8_t {
   kExponential = 2,  // Exponential distribution (bursty)
 };
 
+// Heartbeat timing model for temporal obfuscation.
+enum class HeartbeatTimingModel : std::uint8_t {
+  kUniform = 0,       // Uniform random distribution [min, max]
+  kExponential = 1,   // Exponential distribution (chaotic, with occasional long gaps)
+  kBurst = 2,         // Burst mode: multiple heartbeats quickly, then long silence
+};
+
 // Heartbeat payload type for semantic modeling.
 enum class HeartbeatType : std::uint8_t {
   kEmpty = 0,           // Empty heartbeat (minimal)
   kTimestamp = 1,       // Contains timestamp only
   kIoTSensor = 2,       // IoT-like sensor data (temp/humidity/battery)
-  kGenericTelemetry = 3 // Generic telemetry pattern
+  kGenericTelemetry = 3,// Generic telemetry pattern
+  kRandomSize = 4,      // Random size payload (8-200 bytes)
+  kMimicDNS = 5,        // Mimic DNS response structure
+  kMimicSTUN = 6,       // Mimic STUN binding response
+  kMimicRTP = 7,        // Mimic RTP keepalive packet
 };
 
 // DPI bypass mode presets for Windows GUI.
@@ -122,11 +133,26 @@ struct ObfuscationProfile {
   // Heartbeat configuration.
   HeartbeatType heartbeat_type{HeartbeatType::kIoTSensor};
 
+  // Heartbeat timing model (controls temporal distribution).
+  HeartbeatTimingModel heartbeat_timing_model{HeartbeatTimingModel::kUniform};
+
   // IoT sensor template for heartbeat payloads.
   IoTSensorTemplate iot_sensor_template{};
 
   // Enable entropy normalization for heartbeat messages.
   bool heartbeat_entropy_normalization{true};
+
+  // Burst mode configuration (only used when heartbeat_timing_model == kBurst).
+  std::uint8_t burst_heartbeat_count_min{3};   // Minimum heartbeats per burst
+  std::uint8_t burst_heartbeat_count_max{5};   // Maximum heartbeats per burst
+  std::chrono::seconds burst_silence_min{30};  // Minimum silence between bursts
+  std::chrono::seconds burst_silence_max{60};  // Maximum silence between bursts
+  std::chrono::milliseconds burst_interval{200}; // Interval between heartbeats in a burst
+
+  // Exponential timing configuration (only used when heartbeat_timing_model == kExponential).
+  float exponential_mean_seconds{10.0f};       // Mean interval for exponential distribution
+  std::chrono::seconds exponential_max_gap{120}; // Maximum gap (occasional long pauses)
+  float exponential_long_gap_probability{0.1f}; // Probability of long gap (0.0-1.0)
 };
 
 // Obfuscation metrics for DPI/ML analysis.
@@ -224,9 +250,20 @@ std::chrono::steady_clock::time_point calculate_next_send_ts(
     const ObfuscationProfile& profile, std::uint64_t sequence,
     std::chrono::steady_clock::time_point base_ts);
 
-// Compute heartbeat interval based on profile seed.
+// Compute heartbeat interval based on profile seed and timing model.
 std::chrono::milliseconds compute_heartbeat_interval(const ObfuscationProfile& profile,
                                                       std::uint64_t heartbeat_count);
+
+// Compute heartbeat interval using exponential distribution.
+std::chrono::milliseconds compute_heartbeat_interval_exponential(const ObfuscationProfile& profile,
+                                                                  std::uint64_t heartbeat_count);
+
+// Compute heartbeat interval using burst mode.
+// Returns interval to next heartbeat (short if in burst, long if between bursts).
+// Also returns whether this is the start of a new burst via out parameter.
+std::chrono::milliseconds compute_heartbeat_interval_burst(const ObfuscationProfile& profile,
+                                                            std::uint64_t heartbeat_count,
+                                                            bool& is_burst_start);
 
 // Generate IoT-like sensor payload for heartbeat.
 // Returns deterministic payload based on profile seed and sequence.
@@ -240,6 +277,22 @@ std::vector<std::uint8_t> generate_telemetry_heartbeat_payload(const Obfuscation
 // Generate heartbeat payload based on configured heartbeat type.
 std::vector<std::uint8_t> generate_heartbeat_payload(const ObfuscationProfile& profile,
                                                       std::uint64_t heartbeat_sequence);
+
+// Generate random-size payload (8-200 bytes).
+std::vector<std::uint8_t> generate_random_size_heartbeat_payload(const ObfuscationProfile& profile,
+                                                                  std::uint64_t heartbeat_sequence);
+
+// Generate DNS response-like payload.
+std::vector<std::uint8_t> generate_dns_mimic_heartbeat_payload(const ObfuscationProfile& profile,
+                                                                std::uint64_t heartbeat_sequence);
+
+// Generate STUN binding response-like payload.
+std::vector<std::uint8_t> generate_stun_mimic_heartbeat_payload(const ObfuscationProfile& profile,
+                                                                 std::uint64_t heartbeat_sequence);
+
+// Generate RTP keepalive-like payload.
+std::vector<std::uint8_t> generate_rtp_mimic_heartbeat_payload(const ObfuscationProfile& profile,
+                                                                std::uint64_t heartbeat_sequence);
 
 // Apply entropy normalization to a buffer (fills gaps with pseudo-random data).
 void apply_entropy_normalization(std::vector<std::uint8_t>& buffer,
