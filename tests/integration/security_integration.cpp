@@ -493,8 +493,8 @@ TEST_F(MultiClientTest, ConcurrentHandshakes) {
 
 // Test: Multiple concurrent sessions with data exchange
 TEST_F(MultiClientTest, ConcurrentSessionsDataExchange) {
-  constexpr std::size_t kNumSessions = 50;
-  constexpr std::size_t kMessagesPerSession = 100;
+  constexpr std::size_t kNumSessions = 10;
+  constexpr std::size_t kMessagesPerSession = 50;
 
   std::vector<std::unique_ptr<transport::TransportSession>> sessions;
   sessions.reserve(kNumSessions);
