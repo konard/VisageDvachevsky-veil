@@ -8,7 +8,33 @@
 
 A secure UDP-based transport protocol with cryptographic handshakes and encrypted data transfer.
 
-## Building
+## Quick Installation
+
+### One-Line Client Installer
+
+Install VEIL client with a single command:
+
+```bash
+# Install CLI-only client
+curl -sSL https://raw.githubusercontent.com/VisageDvachevsky/veil/main/install_client.sh | sudo bash
+
+# Install client with Qt6 GUI
+curl -sSL https://raw.githubusercontent.com/VisageDvachevsky/veil/main/install_client.sh | sudo bash -s -- --with-gui
+```
+
+### One-Line Server Installer
+
+Install VEIL server with a single command:
+
+```bash
+# Install CLI-only server
+curl -sSL https://raw.githubusercontent.com/VisageDvachevsky/veil/main/install_veil.sh | sudo bash
+
+# Install server with Qt6 GUI monitoring dashboard
+curl -sSL https://raw.githubusercontent.com/VisageDvachevsky/veil/main/install_veil.sh | sudo bash -s -- --with-gui
+```
+
+## Building from Source
 
 ### Prerequisites
 
@@ -17,7 +43,22 @@ A secure UDP-based transport protocol with cryptographic handshakes and encrypte
 - libsodium
 - Qt6 (optional, for GUI applications)
 
-### Build Commands
+### Build Client Script
+
+Quick client build with configurable options:
+
+```bash
+# Build CLI-only client
+./build_client.sh
+
+# Build client with Qt6 GUI
+./build_client.sh --with-gui
+
+# Clean build and install
+./build_client.sh --with-gui --clean --install
+```
+
+### Manual Build Commands
 
 ```bash
 # Configure and build debug version
