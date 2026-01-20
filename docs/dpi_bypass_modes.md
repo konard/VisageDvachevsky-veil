@@ -54,16 +54,17 @@ ObfuscationProfile iot_mimic_mode{
 
 ---
 
-### Mode B: QUIC-Like
+### Mode B: QUIC-Like (with WebSocket Protocol Wrapper)
 
-**Purpose:** Mimic QUIC protocol traffic (modern HTTP/3, Chrome browser patterns)
+**Purpose:** Mimic WebSocket traffic with real protocol headers for enhanced DPI evasion
 
 **Traffic Characteristics:**
 - **Packet Sizes:** Large initial packets (ClientHello-like), then variable
 - **Timing Pattern:** Bursty with varying inter-packet delays
-- **Payload Structure:** High entropy throughout (encrypted QUIC frames)
+- **Payload Structure:** High entropy throughout (encrypted frames)
 - **Burst Behavior:** Initial burst, then sporadic activity with quiet periods
-- **Entropy:** High entropy (looks like encrypted QUIC)
+- **Entropy:** High entropy (looks like encrypted WebSocket binary frames)
+- **Protocol Headers:** Real WebSocket binary frames (RFC 6455) - **NEW!**
 
 **Configuration:**
 ```cpp
@@ -99,10 +100,17 @@ ObfuscationProfile quic_like_mode{
 ```
 
 **Special Features:**
-- First 3-5 packets should be large (>1000 bytes) to mimic QUIC ClientHello/ServerHello
-- Implement connection migration-like behavior (occasional endpoint changes)
+- **WebSocket Protocol Wrapper:** Wraps VEIL packets in RFC 6455-compliant WebSocket binary frames
+- **Masking:** Client-to-server frames use proper WebSocket masking
+- **DPI Resistance:** DPI systems see legitimate WebSocket traffic, not just statistical mimicry
+- First 3-5 packets should be large (>1000 bytes) to mimic initial handshake
 
-**Use Case:** High-throughput scenarios, modern web traffic camouflage.
+**DPI Systems Evaded:**
+- **Protocol Fingerprinting DPI:** WebSocket headers look legitimate to signature-based DPI
+- **Statistical Analysis:** Combined with traffic shaping, provides multi-layer evasion
+- **Simple Firewalls:** Appears as normal WebSocket traffic (commonly used for web apps)
+
+**Use Case:** High-throughput scenarios, modern web traffic camouflage, evasion of protocol-aware DPI.
 
 ---
 
@@ -350,8 +358,36 @@ For each mode, validate:
 3. **Machine Learning Evasion:** Train adversarial models to evade ML-based DPI
 4. **Custom Mode Builder:** GUI for creating user-defined profiles
 
+## DPI Evasion Comparison
+
+### What Each Mode Evades
+
+| DPI System Type | IoT Mimic | QUIC-Like | Random Noise | Trickle |
+|-----------------|-----------|-----------|--------------|---------|
+| **Statistical Analysis** | ✅ Good | ✅ Excellent | ✅ Excellent | ✅ Good |
+| **Protocol Fingerprinting** | ❌ Limited | ✅ **Yes (WebSocket)** | ❌ Limited | ❌ Limited |
+| **Timing-based Detection** | ✅ Good | ✅ Good | ✅ Excellent | ✅ Excellent |
+| **Size-based Detection** | ✅ Good | ✅ Excellent | ✅ Excellent | ⚠️ Limited (intentionally small) |
+| **Behavioral Heuristics** | ✅ Good | ✅ Good | ⚠️ May look suspicious | ✅ Excellent |
+
+### Protocol Wrapper Status
+
+- **IoT Mimic:** Statistical shaping only (no protocol headers)
+- **QUIC-Like:** ✅ **WebSocket wrapper enabled** (real RFC 6455 headers)
+- **Random Noise:** Statistical shaping only (no protocol headers)
+- **Trickle:** Statistical shaping only (no protocol headers)
+
+### Implementation Notes
+
+**QUIC-Like Mode WebSocket Wrapper:**
+- Wraps each VEIL packet in a WebSocket binary frame
+- Uses proper masking for client-to-server direction
+- Adds 2-14 bytes overhead per packet (minimal impact)
+- DPI sees: `FIN=1, Opcode=Binary(0x2), Masked=1, Payload=<VEIL packet>`
+
 ## References
 
 - [Traffic Obfuscation Techniques](https://www.ndss-symposium.org/ndss-paper/how-china-detects-and-blocks-shadowsocks/)
+- [WebSocket Protocol (RFC 6455)](https://www.rfc-editor.org/rfc/rfc6455.html)
 - [QUIC Protocol Specification](https://www.rfc-editor.org/rfc/rfc9000.html)
 - [IoT Traffic Patterns Analysis](https://ieeexplore.ieee.org/document/8424631)

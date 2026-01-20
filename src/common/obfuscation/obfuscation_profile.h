@@ -52,6 +52,13 @@ enum class HeartbeatType : std::uint8_t {
   kGenericTelemetry = 3 // Generic telemetry pattern
 };
 
+// Protocol wrapper type for DPI evasion.
+// Wrappers add legitimate protocol headers around VEIL packets.
+enum class ProtocolWrapperType : std::uint8_t {
+  kNone = 0,       // No protocol wrapper (default)
+  kWebSocket = 1,  // WebSocket binary frames (RFC 6455)
+};
+
 // DPI bypass mode presets for Windows GUI.
 // Each mode represents a different traffic pattern for evading DPI systems.
 enum class DPIBypassMode : std::uint8_t {
@@ -127,6 +134,12 @@ struct ObfuscationProfile {
 
   // Enable entropy normalization for heartbeat messages.
   bool heartbeat_entropy_normalization{true};
+
+  // Protocol wrapper configuration.
+  ProtocolWrapperType protocol_wrapper{ProtocolWrapperType::kNone};
+
+  // Client-to-server direction (for WebSocket masking).
+  bool is_client_to_server{true};
 };
 
 // Obfuscation metrics for DPI/ML analysis.
@@ -270,5 +283,11 @@ std::optional<DPIBypassMode> dpi_mode_from_string(const std::string& str);
 
 // Get description of a DPI bypass mode.
 const char* dpi_mode_description(DPIBypassMode mode);
+
+// Get human-readable name for a protocol wrapper type.
+const char* protocol_wrapper_to_string(ProtocolWrapperType wrapper);
+
+// Parse protocol wrapper type from string.
+std::optional<ProtocolWrapperType> protocol_wrapper_from_string(const std::string& str);
 
 }  // namespace veil::obfuscation
