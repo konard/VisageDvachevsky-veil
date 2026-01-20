@@ -221,4 +221,197 @@ TEST_F(TransportSessionTest, SmallPacketRejected) {
   EXPECT_FALSE(result.has_value());
 }
 
+// =============================================================================
+// NONCE LIFECYCLE TESTS (Issue #3)
+// These tests verify the security-critical property that nonce counters are
+// never reset, ensuring nonce uniqueness across session rotations.
+// =============================================================================
+
+TEST_F(TransportSessionTest, SendSequenceContinuesAfterSessionRotation) {
+  // Verifies that send_sequence_ is NOT reset during session rotation.
+  // This is critical for nonce uniqueness: nonce = derive_nonce(base_nonce, send_sequence_)
+  // If send_sequence_ were reset, we'd reuse nonces with the same key, breaking security.
+  auto now_fn = [this]() { return steady_now_; };
+
+  transport::TransportSessionConfig config;
+  config.session_rotation_interval = std::chrono::seconds(1);
+  config.session_rotation_packets = 1000000;
+
+  transport::TransportSession client(client_handshake_, config, now_fn);
+
+  // Send some packets before rotation
+  const std::uint64_t packets_before_rotation = 10;
+  for (std::uint64_t i = 0; i < packets_before_rotation; ++i) {
+    std::vector<std::uint8_t> data{static_cast<std::uint8_t>(i)};
+    client.encrypt_data(data, 0, false);
+  }
+
+  std::uint64_t sequence_before_rotation = client.send_sequence();
+  EXPECT_EQ(sequence_before_rotation, packets_before_rotation);
+
+  // Trigger session rotation
+  steady_now_ += std::chrono::seconds(2);
+  EXPECT_TRUE(client.should_rotate_session());
+  client.rotate_session();
+
+  // CRITICAL ASSERTION: send_sequence must NOT be reset
+  std::uint64_t sequence_after_rotation = client.send_sequence();
+  EXPECT_EQ(sequence_after_rotation, sequence_before_rotation)
+      << "send_sequence_ must NOT reset after session rotation to prevent nonce reuse";
+
+  // Send more packets after rotation
+  const std::uint64_t packets_after_rotation = 5;
+  for (std::uint64_t i = 0; i < packets_after_rotation; ++i) {
+    std::vector<std::uint8_t> data{static_cast<std::uint8_t>(i + 100)};
+    client.encrypt_data(data, 0, false);
+  }
+
+  // Verify sequence continues monotonically
+  EXPECT_EQ(client.send_sequence(), packets_before_rotation + packets_after_rotation)
+      << "send_sequence_ must continue incrementing after rotation";
+}
+
+TEST_F(TransportSessionTest, NonceUniquenessAcrossMultipleRotations) {
+  // Verifies nonces are unique even after multiple session rotations.
+  // This test collects all sequence numbers used across rotations and
+  // verifies they are all unique.
+  auto now_fn = [this]() { return steady_now_; };
+
+  transport::TransportSessionConfig config;
+  config.session_rotation_interval = std::chrono::seconds(1);
+  config.session_rotation_packets = 1000000;
+
+  transport::TransportSession client(client_handshake_, config, now_fn);
+
+  std::vector<std::uint64_t> all_sequences;
+  const int num_rotations = 3;
+  const int packets_per_rotation = 5;
+
+  for (int rotation = 0; rotation <= num_rotations; ++rotation) {
+    // Record sequences before sending
+    for (int pkt = 0; pkt < packets_per_rotation; ++pkt) {
+      std::uint64_t seq_before = client.send_sequence();
+      all_sequences.push_back(seq_before);
+
+      std::vector<std::uint8_t> data{static_cast<std::uint8_t>(rotation * 10 + pkt)};
+      client.encrypt_data(data, 0, false);
+    }
+
+    if (rotation < num_rotations) {
+      // Trigger rotation
+      steady_now_ += std::chrono::seconds(2);
+      client.rotate_session();
+    }
+  }
+
+  // Verify all sequences are unique
+  std::vector<std::uint64_t> sorted_sequences = all_sequences;
+  std::sort(sorted_sequences.begin(), sorted_sequences.end());
+
+  for (std::size_t i = 1; i < sorted_sequences.size(); ++i) {
+    EXPECT_NE(sorted_sequences[i], sorted_sequences[i - 1])
+        << "Duplicate sequence number detected: " << sorted_sequences[i]
+        << " - this would cause nonce reuse!";
+  }
+
+  // Verify sequences are strictly increasing (monotonic)
+  for (std::size_t i = 1; i < all_sequences.size(); ++i) {
+    EXPECT_GT(all_sequences[i], all_sequences[i - 1])
+        << "Sequence numbers must be strictly increasing";
+  }
+}
+
+TEST_F(TransportSessionTest, EncryptDecryptAcrossSessionRotations) {
+  // End-to-end test verifying that packets encrypted before and after
+  // session rotation can all be decrypted correctly by the peer.
+  // This proves the nonce/key relationship is maintained correctly.
+  auto client_now_fn = [this]() { return steady_now_; };
+  auto server_now_fn = [this]() { return steady_now_; };
+
+  transport::TransportSessionConfig config;
+  config.session_rotation_interval = std::chrono::seconds(1);
+  config.session_rotation_packets = 1000000;
+
+  transport::TransportSession client(client_handshake_, config, client_now_fn);
+  transport::TransportSession server(server_handshake_, config, server_now_fn);
+
+  std::vector<std::vector<std::uint8_t>> all_encrypted;
+  std::vector<std::vector<std::uint8_t>> expected_plaintexts;
+
+  // Send packets before rotation
+  for (int i = 0; i < 3; ++i) {
+    std::vector<std::uint8_t> plaintext{0x10, static_cast<std::uint8_t>(i)};
+    expected_plaintexts.push_back(plaintext);
+    auto encrypted = client.encrypt_data(plaintext, 0, false);
+    for (auto& pkt : encrypted) {
+      all_encrypted.push_back(std::move(pkt));
+    }
+  }
+
+  // Trigger rotation on client only (simulating real-world scenario)
+  // Note: In real protocol, rotation would be coordinated, but for this test
+  // we're verifying the crypto layer continues working
+  steady_now_ += std::chrono::seconds(2);
+  client.rotate_session();
+
+  // Send packets after rotation
+  for (int i = 0; i < 3; ++i) {
+    std::vector<std::uint8_t> plaintext{0x20, static_cast<std::uint8_t>(i)};
+    expected_plaintexts.push_back(plaintext);
+    auto encrypted = client.encrypt_data(plaintext, 0, false);
+    for (auto& pkt : encrypted) {
+      all_encrypted.push_back(std::move(pkt));
+    }
+  }
+
+  // Decrypt all packets - they should all succeed because:
+  // 1. Keys haven't changed (session rotation changes session_id, not crypto keys)
+  // 2. Nonces are all unique (send_sequence_ was not reset)
+  for (std::size_t i = 0; i < all_encrypted.size(); ++i) {
+    auto decrypted = server.decrypt_packet(all_encrypted[i]);
+    ASSERT_TRUE(decrypted.has_value()) << "Failed to decrypt packet " << i;
+    ASSERT_EQ(decrypted->size(), 1U);
+    EXPECT_EQ((*decrypted)[0].data.payload, expected_plaintexts[i])
+        << "Decrypted payload mismatch for packet " << i;
+  }
+}
+
+TEST_F(TransportSessionTest, PacketCountBasedRotationPreservesSequence) {
+  // Test rotation triggered by packet count threshold (not time)
+  auto now_fn = [this]() { return steady_now_; };
+
+  transport::TransportSessionConfig config;
+  config.session_rotation_interval = std::chrono::hours(24);  // Very long, won't trigger
+  config.session_rotation_packets = 5;  // Small threshold for testing
+
+  transport::TransportSession client(client_handshake_, config, now_fn);
+
+  auto initial_session_id = client.session_id();
+
+  // Send packets until rotation should trigger
+  for (int i = 0; i < 5; ++i) {
+    std::vector<std::uint8_t> data{static_cast<std::uint8_t>(i)};
+    client.encrypt_data(data, 0, false);
+  }
+
+  EXPECT_EQ(client.send_sequence(), 5U);
+  EXPECT_TRUE(client.should_rotate_session());
+
+  std::uint64_t sequence_before = client.send_sequence();
+  client.rotate_session();
+  std::uint64_t sequence_after = client.send_sequence();
+
+  // Session ID should change
+  EXPECT_NE(client.session_id(), initial_session_id);
+
+  // But sequence should NOT reset
+  EXPECT_EQ(sequence_after, sequence_before)
+      << "Packet-count triggered rotation must not reset send_sequence_";
+
+  // Continue sending - sequence should continue
+  std::vector<std::uint8_t> data{0xFF};
+  client.encrypt_data(data, 0, false);
+  EXPECT_EQ(client.send_sequence(), 6U);
+}
+
 }  // namespace veil::tests
