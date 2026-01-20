@@ -26,6 +26,7 @@ add_executable(veil_unit_tests
   constrained_logging_tests.cpp
   metrics_tests.cpp
   session_migration_tests.cpp
+  thread_checker_tests.cpp
 )
 
 target_link_libraries(veil_unit_tests PRIVATE

@@ -24,8 +24,19 @@ namespace veil::handshake {
  * Implementation details:
  * - Fixed capacity with LRU eviction policy
  * - O(1) lookup, insert, and eviction operations
- * - Thread-safe for concurrent access
  * - Automatic cleanup of expired entries
+ *
+ * Thread Safety:
+ *   This class IS thread-safe. All public methods are protected by an internal
+ *   mutex, allowing safe concurrent access from multiple threads. This is
+ *   necessary because handshake processing may occur on different threads
+ *   than the main event loop.
+ *
+ *   Note: This is one of the few classes in VEIL that provides internal
+ *   synchronization. Most other components rely on single-threaded access
+ *   patterns enforced by the event loop.
+ *
+ * @see docs/thread_model.md for the VEIL threading model documentation.
  */
 class HandshakeReplayCache {
  public:

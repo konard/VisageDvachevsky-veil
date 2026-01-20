@@ -87,7 +87,17 @@ struct RetransmitStats {
   std::uint64_t high_water_mark_hits{0};
 };
 
-// Manages a buffer of unacknowledged packets with RTT estimation and retransmission.
+/**
+ * Manages a buffer of unacknowledged packets with RTT estimation and retransmission.
+ *
+ * Thread Safety:
+ *   This class is NOT thread-safe. All methods must be called from a single
+ *   thread (typically the event loop thread). The buffer contains internal
+ *   state (pending packets, RTT estimates, rate limiting state) that is not
+ *   protected by locks.
+ *
+ * @see docs/thread_model.md for the VEIL threading model documentation.
+ */
 class RetransmitBuffer {
  public:
   using Clock = std::chrono::steady_clock;
