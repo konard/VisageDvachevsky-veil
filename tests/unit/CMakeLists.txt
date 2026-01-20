@@ -2,6 +2,7 @@ add_executable(veil_unit_tests
   random_tests.cpp
   config_tests.cpp
   crypto_tests.cpp
+  websocket_wrapper_tests.cpp
   packet_tests.cpp
   replay_window_tests.cpp
   handshake_replay_cache_tests.cpp
@@ -26,6 +27,7 @@ add_executable(veil_unit_tests
   constrained_logging_tests.cpp
   metrics_tests.cpp
   session_migration_tests.cpp
+  thread_checker_tests.cpp
 )
 
 target_link_libraries(veil_unit_tests PRIVATE

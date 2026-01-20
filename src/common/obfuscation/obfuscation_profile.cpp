@@ -973,6 +973,7 @@ ObfuscationProfile create_dpi_mode_profile(DPIBypassMode mode) {
 
     case DPIBypassMode::kQUICLike: {
       // Mode B: QUIC-Like - Mimic QUIC/HTTP3 traffic
+      // NOW WITH WebSocket protocol wrapper for real protocol headers!
       ObfuscationProfile profile;
       profile.enabled = true;
       profile.max_padding_size = 1200;
@@ -1005,6 +1006,9 @@ ObfuscationProfile create_dpi_mode_profile(DPIBypassMode mode) {
       profile.exponential_max_gap = 180s;
       profile.exponential_long_gap_probability = 0.2f;
       profile.heartbeat_entropy_normalization = true;
+      // Enable WebSocket wrapper for real protocol headers
+      profile.protocol_wrapper = ProtocolWrapperType::kWebSocket;
+      profile.is_client_to_server = true;
       return profile;
     }
 
@@ -1132,7 +1136,7 @@ const char* dpi_mode_description(DPIBypassMode mode) {
     case DPIBypassMode::kIoTMimic:
       return "Simulates IoT sensor traffic. Good balance of stealth and performance.";
     case DPIBypassMode::kQUICLike:
-      return "Mimics modern HTTP/3 traffic. Best for high-throughput scenarios.";
+      return "Mimics WebSocket traffic with real protocol headers. Best for high-throughput scenarios.";
     case DPIBypassMode::kRandomNoise:
       return "Maximum unpredictability. Use in extreme censorship scenarios.";
     case DPIBypassMode::kTrickle:
@@ -1142,6 +1146,27 @@ const char* dpi_mode_description(DPIBypassMode mode) {
     default:
       return "Unknown mode.";
   }
+}
+
+const char* protocol_wrapper_to_string(ProtocolWrapperType wrapper) {
+  switch (wrapper) {
+    case ProtocolWrapperType::kNone:
+      return "None";
+    case ProtocolWrapperType::kWebSocket:
+      return "WebSocket";
+    default:
+      return "Unknown";
+  }
+}
+
+std::optional<ProtocolWrapperType> protocol_wrapper_from_string(const std::string& str) {
+  if (str == "None" || str == "none" || str == "0") {
+    return ProtocolWrapperType::kNone;
+  }
+  if (str == "WebSocket" || str == "websocket" || str == "1") {
+    return ProtocolWrapperType::kWebSocket;
+  }
+  return std::nullopt;
 }
 
 }  // namespace veil::obfuscation

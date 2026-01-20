@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "common/utils/thread_checker.h"
 #include "common/utils/timer_heap.h"
 #include "transport/udp_socket/udp_socket.h"
 
@@ -63,8 +64,24 @@ struct SocketInfo {
   bool writable{true};
 };
 
-// Event loop for managing UDP sockets with epoll and timers.
-// Handles I/O events, timeouts, and session management.
+/**
+ * Event loop for managing UDP sockets with epoll and timers.
+ * Handles I/O events, timeouts, and session management.
+ *
+ * Thread Safety:
+ *   This class is designed for single-threaded operation. All methods except
+ *   stop() and is_running() must be called from the thread that calls run().
+ *   The stop() method is safe to call from any thread (uses atomic flag).
+ *
+ *   - add_socket(), remove_socket(): Must be called from event loop thread
+ *   - send_packet(): Must be called from event loop thread
+ *   - schedule_timer(), cancel_timer(): Must be called from event loop thread
+ *   - run(): Blocking; establishes the "event loop thread"
+ *   - stop(): Thread-safe (can be called from any thread, e.g., signal handler)
+ *   - is_running(): Thread-safe (atomic read)
+ *
+ * @see docs/thread_model.md for the VEIL threading model documentation.
+ */
 class EventLoop {
  public:
   using Clock = std::chrono::steady_clock;
@@ -126,6 +143,10 @@ class EventLoop {
   std::atomic<bool> running_{false};
   utils::TimerHeap timer_heap_;
   std::unordered_map<int, SocketInfo> sockets_;
+
+  // Thread safety: verifies single-threaded access in debug builds.
+  // Bound to the thread that calls run().
+  VEIL_THREAD_CHECKER(thread_checker_);
 };
 
 }  // namespace veil::transport

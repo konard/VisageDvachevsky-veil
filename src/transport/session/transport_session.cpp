@@ -31,6 +31,8 @@ TransportSession::TransportSession(const handshake::HandshakeSession& handshake_
       now_fn_(std::move(now_fn)),
       keys_(handshake_session.keys),
       current_session_id_(handshake_session.session_id),
+      send_seq_obfuscation_key_(crypto::derive_sequence_obfuscation_key(keys_.send_key, keys_.send_nonce)),
+      recv_seq_obfuscation_key_(crypto::derive_sequence_obfuscation_key(keys_.recv_key, keys_.recv_nonce)),
       replay_window_(config_.replay_window_size),
       session_rotator_(config_.session_rotation_interval, config_.session_rotation_packets),
       reorder_buffer_(0, config_.reorder_buffer_size),
@@ -45,11 +47,15 @@ TransportSession::~TransportSession() {
   sodium_memzero(keys_.recv_key.data(), keys_.recv_key.size());
   sodium_memzero(keys_.send_nonce.data(), keys_.send_nonce.size());
   sodium_memzero(keys_.recv_nonce.data(), keys_.recv_nonce.size());
+  sodium_memzero(send_seq_obfuscation_key_.data(), send_seq_obfuscation_key_.size());
+  sodium_memzero(recv_seq_obfuscation_key_.data(), recv_seq_obfuscation_key_.size());
   LOG_DEBUG("TransportSession destroyed, keys cleared");
 }
 
 std::vector<std::vector<std::uint8_t>> TransportSession::encrypt_data(
     std::span<const std::uint8_t> plaintext, std::uint64_t stream_id, bool fin) {
+  VEIL_DCHECK_THREAD(thread_checker_);
+
   std::vector<std::vector<std::uint8_t>> result;
 
   // Fragment data if necessary.
@@ -78,6 +84,8 @@ std::vector<std::vector<std::uint8_t>> TransportSession::encrypt_data(
 
 std::optional<std::vector<mux::MuxFrame>> TransportSession::decrypt_packet(
     std::span<const std::uint8_t> ciphertext) {
+  VEIL_DCHECK_THREAD(thread_checker_);
+
   // Minimum packet size: nonce (8 bytes for sequence) + tag (16 bytes) + header (1 byte minimum)
   constexpr std::size_t kMinPacketSize = 8 + 16 + 1;
   if (ciphertext.size() < kMinPacketSize) {
@@ -86,11 +94,16 @@ std::optional<std::vector<mux::MuxFrame>> TransportSession::decrypt_packet(
     return std::nullopt;
   }
 
-  // Extract sequence from first 8 bytes (used as part of nonce).
-  std::uint64_t sequence = 0;
+  // Extract obfuscated sequence from first 8 bytes.
+  std::uint64_t obfuscated_sequence = 0;
   for (int i = 0; i < 8; ++i) {
-    sequence = (sequence << 8) | ciphertext[static_cast<std::size_t>(i)];
+    obfuscated_sequence = (obfuscated_sequence << 8) | ciphertext[static_cast<std::size_t>(i)];
   }
+
+  // DPI RESISTANCE (Issue #21): Deobfuscate sequence number.
+  // The sender obfuscated the sequence to prevent traffic analysis. We reverse the
+  // obfuscation here to recover the real sequence for nonce derivation and replay checking.
+  const std::uint64_t sequence = crypto::deobfuscate_sequence(obfuscated_sequence, recv_seq_obfuscation_key_);
 
   // Replay check.
   if (!replay_window_.mark_and_check(sequence)) {
@@ -134,6 +147,8 @@ std::optional<std::vector<mux::MuxFrame>> TransportSession::decrypt_packet(
 }
 
 std::vector<std::vector<std::uint8_t>> TransportSession::get_retransmit_packets() {
+  VEIL_DCHECK_THREAD(thread_checker_);
+
   std::vector<std::vector<std::uint8_t>> result;
   auto to_retransmit = retransmit_buffer_.get_packets_to_retransmit();
 
@@ -151,6 +166,8 @@ std::vector<std::vector<std::uint8_t>> TransportSession::get_retransmit_packets(
 }
 
 void TransportSession::process_ack(const mux::AckFrame& ack) {
+  VEIL_DCHECK_THREAD(thread_checker_);
+
   // Cumulative ACK.
   retransmit_buffer_.acknowledge_cumulative(ack.ack);
 
@@ -166,6 +183,8 @@ void TransportSession::process_ack(const mux::AckFrame& ack) {
 }
 
 mux::AckFrame TransportSession::generate_ack(std::uint64_t stream_id) {
+  VEIL_DCHECK_THREAD(thread_checker_);
+
   return mux::AckFrame{
       .stream_id = stream_id,
       .ack = recv_ack_bitmap_.head(),
@@ -174,12 +193,12 @@ mux::AckFrame TransportSession::generate_ack(std::uint64_t stream_id) {
 }
 
 bool TransportSession::should_rotate_session() {
+  VEIL_DCHECK_THREAD(thread_checker_);
   return session_rotator_.should_rotate(packets_since_rotation_, now_fn_());
 }
 
 void TransportSession::rotate_session() {
-  // Store sequence before rotation for assertion
-  const std::uint64_t sequence_before_rotation = send_sequence_;
+  VEIL_DCHECK_THREAD(thread_checker_);
 
   current_session_id_ = session_rotator_.rotate(now_fn_());
   packets_since_rotation_ = 0;
@@ -247,12 +266,17 @@ std::vector<std::uint8_t> TransportSession::build_encrypted_packet(const mux::Mu
   // Encrypt using ChaCha20-Poly1305 AEAD.
   auto ciphertext = crypto::aead_encrypt(keys_.send_key, nonce, {}, plaintext);
 
-  // Prepend sequence number (8 bytes big-endian).
-  // The sequence is sent in plaintext to allow the receiver to derive the same nonce.
+  // DPI RESISTANCE (Issue #21): Obfuscate sequence number before transmission.
+  // Previously, the sequence was sent in plaintext, creating a DPI signature (monotonically
+  // increasing values). Now we obfuscate it using ChaCha20 with a session-specific key.
+  // The receiver can deobfuscate using the same key to recover the sequence for nonce derivation.
+  const std::uint64_t obfuscated_sequence = crypto::obfuscate_sequence(send_sequence_, send_seq_obfuscation_key_);
+
+  // Prepend obfuscated sequence number (8 bytes big-endian).
   std::vector<std::uint8_t> packet;
   packet.reserve(8 + ciphertext.size());
   for (int i = 7; i >= 0; --i) {
-    packet.push_back(static_cast<std::uint8_t>((send_sequence_ >> (8 * i)) & 0xFF));
+    packet.push_back(static_cast<std::uint8_t>((obfuscated_sequence >> (8 * i)) & 0xFF));
   }
   packet.insert(packet.end(), ciphertext.begin(), ciphertext.end());
 

@@ -16,6 +16,10 @@ namespace {
 constexpr std::array<std::uint8_t, 2> kMagic{'H', 'S'};
 constexpr std::uint8_t kVersion = 1;
 
+// Handshake padding configuration (DPI resistance)
+constexpr std::uint16_t kMinPaddingSize = 32;   // Minimum padding bytes
+constexpr std::uint16_t kMaxPaddingSize = 400;  // Maximum padding bytes
+
 std::uint64_t to_millis(std::chrono::system_clock::time_point tp) {
   return static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::milliseconds>(tp.time_since_epoch()).count());
@@ -80,6 +84,16 @@ bool timestamp_valid(std::uint64_t remote_ts, std::chrono::milliseconds skew,
   const auto diff = (remote_ts > now_ms) ? (remote_ts - now_ms) : (now_ms - remote_ts);
   return diff <= static_cast<std::uint64_t>(skew.count());
 }
+
+// Compute random padding size for handshake packets (DPI resistance)
+std::uint16_t compute_random_padding_size() {
+  if (kMinPaddingSize >= kMaxPaddingSize) {
+    return kMinPaddingSize;
+  }
+  const auto random_val = veil::crypto::random_uint64();
+  const auto range = static_cast<std::uint64_t>(kMaxPaddingSize - kMinPaddingSize + 1);
+  return static_cast<std::uint16_t>(kMinPaddingSize + (random_val % range));
+}
 }  // namespace
 
 namespace veil::handshake {
@@ -110,14 +124,26 @@ std::vector<std::uint8_t> HandshakeInitiator::create_init() {
   auto hmac_payload = build_init_hmac_payload(init_timestamp_ms_, ephemeral_.public_key);
   const auto mac = crypto::hmac_sha256(psk_, hmac_payload);
 
+  // Generate random padding for DPI resistance
+  const auto padding_size = compute_random_padding_size();
+  const auto padding = veil::crypto::random_bytes(padding_size);
+
   std::vector<std::uint8_t> out;
-  out.reserve(kMagic.size() + 1 + 1 + 8 + ephemeral_.public_key.size() + mac.size());
+  out.reserve(kMagic.size() + 1 + 1 + 8 + ephemeral_.public_key.size() + mac.size() + 2 + padding_size);
   out.insert(out.end(), kMagic.begin(), kMagic.end());
   out.push_back(kVersion);
   out.push_back(static_cast<std::uint8_t>(MessageType::kInit));
   write_u64(out, init_timestamp_ms_);
   out.insert(out.end(), ephemeral_.public_key.begin(), ephemeral_.public_key.end());
   out.insert(out.end(), mac.begin(), mac.end());
+
+  // Append padding length (2 bytes, big-endian)
+  out.push_back(static_cast<std::uint8_t>((padding_size >> 8) & 0xFF));
+  out.push_back(static_cast<std::uint8_t>(padding_size & 0xFF));
+
+  // Append random padding
+  out.insert(out.end(), padding.begin(), padding.end());
+
   return out;
 }
 
@@ -126,8 +152,14 @@ std::optional<HandshakeSession> HandshakeInitiator::consume_response(
   if (!init_sent_) {
     return std::nullopt;
   }
-  const std::size_t expected_size = kMagic.size() + 1 + 1 + 8 + 8 + 8 + 32 + 32;
-  if (response.size() != expected_size) {
+  // Minimum size: header + fields + padding_length (2 bytes)
+  const std::size_t min_size = kMagic.size() + 1 + 1 + 8 + 8 + 8 + 32 + 32 + 2;
+  if (response.size() < min_size) {
+    return std::nullopt;
+  }
+  // Maximum size with maximum padding
+  const std::size_t max_size = min_size + kMaxPaddingSize;
+  if (response.size() > max_size) {
     return std::nullopt;
   }
   if (!std::equal(kMagic.begin(), kMagic.end(), response.begin())) {
@@ -152,14 +184,33 @@ std::optional<HandshakeSession> HandshakeInitiator::consume_response(
   }
 
   const auto hmac_offset = 28 + responder_pub.size();
+  std::array<std::uint8_t, crypto::kHmacSha256Len> provided_mac{};
+  std::copy_n(response.begin() + static_cast<std::ptrdiff_t>(hmac_offset), crypto::kHmacSha256Len, provided_mac.begin());
+
   const auto hmac_payload =
       build_hmac_payload(static_cast<std::uint8_t>(MessageType::kResponse), init_ts, resp_ts,
                          session_id, init_pub, responder_pub);
   const auto expected_mac = crypto::hmac_sha256(psk_, hmac_payload);
-  std::vector<std::uint8_t> provided(response.begin() + static_cast<std::ptrdiff_t>(hmac_offset),
-                                     response.end());
-  if (provided.size() != expected_mac.size() ||
-      !std::equal(expected_mac.begin(), expected_mac.end(), provided.begin())) {
+  if (!std::equal(expected_mac.begin(), expected_mac.end(), provided_mac.begin())) {
+    return std::nullopt;
+  }
+
+  // Validate padding length field (after HMAC)
+  const auto padding_len_offset = hmac_offset + crypto::kHmacSha256Len;
+  if (response.size() < padding_len_offset + 2) {
+    return std::nullopt;
+  }
+  const auto padding_len = static_cast<std::uint16_t>(
+      (response[padding_len_offset] << 8) | response[padding_len_offset + 1]);
+
+  // Validate padding length is within allowed range
+  if (padding_len < kMinPaddingSize || padding_len > kMaxPaddingSize) {
+    return std::nullopt;
+  }
+
+  // Validate total packet size matches expected size with padding
+  const std::size_t expected_total_size = padding_len_offset + 2 + padding_len;
+  if (response.size() != expected_total_size) {
     return std::nullopt;
   }
 
@@ -204,9 +255,15 @@ HandshakeResponder::~HandshakeResponder() {
 
 std::optional<HandshakeResponder::Result> HandshakeResponder::handle_init(
     std::span<const std::uint8_t> init_bytes) {
-  constexpr std::size_t init_size =
-      kMagic.size() + 1 + 1 + 8 + crypto::kX25519PublicKeySize + crypto::kHmacSha256Len;
-  if (init_bytes.size() != init_size) {
+  // Minimum size: header + fields + HMAC + padding_length (2 bytes)
+  constexpr std::size_t min_init_size =
+      kMagic.size() + 1 + 1 + 8 + crypto::kX25519PublicKeySize + crypto::kHmacSha256Len + 2;
+  if (init_bytes.size() < min_init_size) {
+    return std::nullopt;
+  }
+  // Maximum size with maximum padding
+  const std::size_t max_init_size = min_init_size + kMaxPaddingSize;
+  if (init_bytes.size() > max_init_size) {
     return std::nullopt;
   }
   if (!rate_limiter_.allow()) {
@@ -231,13 +288,33 @@ std::optional<HandshakeResponder::Result> HandshakeResponder::handle_init(
     return std::nullopt;  // Replay detected - silently ignore
   }
 
-  const auto provided_mac_begin = init_bytes.begin() + 12 + init_pub.size();
-  const std::vector<std::uint8_t> provided_mac(provided_mac_begin, init_bytes.end());
+  // Extract HMAC (32 bytes after the ephemeral public key)
+  const auto mac_offset = 12 + init_pub.size();
+  std::array<std::uint8_t, crypto::kHmacSha256Len> provided_mac{};
+  std::copy_n(init_bytes.begin() + static_cast<std::ptrdiff_t>(mac_offset), crypto::kHmacSha256Len, provided_mac.begin());
 
   const auto hmac_payload = build_init_hmac_payload(init_ts, init_pub);
   const auto expected_mac = crypto::hmac_sha256(psk_, hmac_payload);
-  if (provided_mac.size() != expected_mac.size() ||
-      !std::equal(expected_mac.begin(), expected_mac.end(), provided_mac.begin())) {
+  if (!std::equal(expected_mac.begin(), expected_mac.end(), provided_mac.begin())) {
+    return std::nullopt;
+  }
+
+  // Validate padding length field (after HMAC)
+  const auto padding_len_offset = mac_offset + crypto::kHmacSha256Len;
+  if (init_bytes.size() < padding_len_offset + 2) {
+    return std::nullopt;
+  }
+  const auto padding_len = static_cast<std::uint16_t>(
+      (init_bytes[padding_len_offset] << 8) | init_bytes[padding_len_offset + 1]);
+
+  // Validate padding length is within allowed range
+  if (padding_len < kMinPaddingSize || padding_len > kMaxPaddingSize) {
+    return std::nullopt;
+  }
+
+  // Validate total packet size matches expected size with padding
+  const std::size_t expected_total_size = padding_len_offset + 2 + padding_len;
+  if (init_bytes.size() != expected_total_size) {
     return std::nullopt;
   }
 
@@ -260,8 +337,12 @@ std::optional<HandshakeResponder::Result> HandshakeResponder::handle_init(
                                               responder_keys.public_key);
   const auto mac = crypto::hmac_sha256(psk_, hmac_payload_resp);
 
+  // Generate random padding for DPI resistance
+  const auto padding_size = compute_random_padding_size();
+  const auto padding = veil::crypto::random_bytes(padding_size);
+
   std::vector<std::uint8_t> response;
-  response.reserve(kMagic.size() + 1 + 1 + 8 + 8 + 8 + init_pub.size() + mac.size());
+  response.reserve(kMagic.size() + 1 + 1 + 8 + 8 + 8 + init_pub.size() + mac.size() + 2 + padding_size);
   response.insert(response.end(), kMagic.begin(), kMagic.end());
   response.push_back(kVersion);
   response.push_back(static_cast<std::uint8_t>(MessageType::kResponse));
@@ -270,6 +351,13 @@ std::optional<HandshakeResponder::Result> HandshakeResponder::handle_init(
   write_u64(response, session_id);
   response.insert(response.end(), responder_keys.public_key.begin(), responder_keys.public_key.end());
   response.insert(response.end(), mac.begin(), mac.end());
+
+  // Append padding length (2 bytes, big-endian)
+  response.push_back(static_cast<std::uint8_t>((padding_size >> 8) & 0xFF));
+  response.push_back(static_cast<std::uint8_t>(padding_size & 0xFF));
+
+  // Append random padding
+  response.insert(response.end(), padding.begin(), padding.end());
 
   HandshakeSession session{
       .session_id = session_id,

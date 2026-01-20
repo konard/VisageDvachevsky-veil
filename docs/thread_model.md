@@ -217,6 +217,47 @@ All sensitive data is cleared using `sodium_memzero()`:
 }
 ```
 
+## Runtime Thread Safety Assertions
+
+VEIL provides a `ThreadChecker` utility class (`src/common/utils/thread_checker.h`) for
+enforcing thread ownership at runtime. This utility provides debug-only assertions
+with zero overhead in release builds.
+
+### ThreadChecker Usage
+
+```cpp
+#include "common/utils/thread_checker.h"
+
+class SingleThreadedComponent {
+ public:
+  void do_work() {
+    // Asserts in debug builds if called from wrong thread
+    VEIL_DCHECK_THREAD(thread_checker_);
+    // ... component logic ...
+  }
+
+ private:
+  VEIL_THREAD_CHECKER(thread_checker_);
+};
+```
+
+### Components with Thread Assertions
+
+The following components use `ThreadChecker` to enforce single-threaded access:
+
+| Component | File | Thread Binding |
+|-----------|------|----------------|
+| `EventLoop` | `src/transport/event_loop/event_loop.h` | Binds to thread that calls `run()` |
+| `TransportSession` | `src/transport/session/transport_session.h` | Binds to creating thread |
+
+### ThreadChecker API
+
+- `VEIL_THREAD_CHECKER(name)` - Declare a thread checker member
+- `VEIL_DCHECK_THREAD(checker)` - Assert current thread is owner (debug only)
+- `VEIL_DCHECK_THREAD_SCOPE(checker)` - Scoped check on entry and exit
+- `checker.rebind_to_current()` - Transfer ownership to current thread
+- `checker.detach()` - Release thread ownership
+
 ## Recommendations
 
 ### For Library Users
@@ -236,12 +277,18 @@ All sensitive data is cleared using `sodium_memzero()`:
 ### For Contributors
 
 1. **Adding new components**
-   - Document thread safety guarantees
+   - Document thread safety guarantees in class documentation
    - Prefer single-threaded designs
+   - Use `VEIL_THREAD_CHECKER` macro to enforce single-threaded access
    - Use atomics for simple flags
    - Use mutex only when necessary
 
-2. **Modifying crypto code**
+2. **Thread Safety Documentation**
+   - Add Thread Safety section to class docstrings
+   - Specify which methods are thread-safe
+   - Reference this document for details
+
+3. **Modifying crypto code**
    - Always clear sensitive data
    - Use `crypto::secure_zero()` or `sodium_memzero()`
    - Test for memory leaks with valgrind
