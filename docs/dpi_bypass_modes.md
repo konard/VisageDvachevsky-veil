@@ -46,9 +46,18 @@ ObfuscationProfile iot_mimic_mode{
   .timing_jitter_model = TimingJitterModel::kPoisson,
   .timing_jitter_scale = 0.8f,  // Lower jitter scale for predictable traffic
   .heartbeat_type = HeartbeatType::kIoTSensor,
+  .heartbeat_timing_model = HeartbeatTimingModel::kExponential,  // Non-periodic timing
+  .exponential_mean_seconds = 15.0f,
+  .exponential_max_gap = 60s,
+  .exponential_long_gap_probability = 0.15f,
   .heartbeat_entropy_normalization = true
 };
 ```
+
+**Special Features:**
+- **Non-Periodic Heartbeats:** Uses exponential distribution to avoid regular timing patterns
+- **Occasional Long Gaps:** 15% probability of gaps up to 60 seconds to defeat pattern detection
+- **IoT Sensor Payloads:** Mimics temperature/humidity/battery telemetry data
 
 **Use Case:** General purpose, good balance of stealth and performance.
 
@@ -94,8 +103,14 @@ ObfuscationProfile quic_like_mode{
   .use_advanced_padding = true,
   .timing_jitter_model = TimingJitterModel::kExponential,  // Bursty timing
   .timing_jitter_scale = 1.5f,  // Higher jitter for QUIC-like burstiness
-  .heartbeat_type = HeartbeatType::kGenericTelemetry,
-  .heartbeat_entropy_normalization = true
+  .heartbeat_type = HeartbeatType::kRandomSize,  // Varied payload sizes
+  .heartbeat_timing_model = HeartbeatTimingModel::kExponential,
+  .exponential_mean_seconds = 45.0f,
+  .exponential_max_gap = 180s,
+  .exponential_long_gap_probability = 0.2f,
+  .heartbeat_entropy_normalization = true,
+  .protocol_wrapper = ProtocolWrapperType::kWebSocket,
+  .is_client_to_server = true
 };
 ```
 
@@ -103,6 +118,8 @@ ObfuscationProfile quic_like_mode{
 - **WebSocket Protocol Wrapper:** Wraps VEIL packets in RFC 6455-compliant WebSocket binary frames
 - **Masking:** Client-to-server frames use proper WebSocket masking
 - **DPI Resistance:** DPI systems see legitimate WebSocket traffic, not just statistical mimicry
+- **Random-Size Heartbeats:** Payload size varies (8-200 bytes) to prevent size-based detection
+- **Exponential Timing:** Non-periodic heartbeats with 20% probability of long gaps (up to 3 minutes)
 - First 3-5 packets should be large (>1000 bytes) to mimic initial handshake
 
 **DPI Systems Evaded:**
@@ -153,12 +170,20 @@ ObfuscationProfile random_noise_mode{
   .use_advanced_padding = true,
   .timing_jitter_model = TimingJitterModel::kUniform,  // Random timing
   .timing_jitter_scale = 2.0f,  // Maximum jitter scale
-  .heartbeat_type = HeartbeatType::kEmpty,  // Minimal heartbeats
+  .heartbeat_type = HeartbeatType::kRandomSize,  // Varied payload sizes
+  .heartbeat_timing_model = HeartbeatTimingModel::kBurst,  // Burst mode
+  .burst_heartbeat_count_min = 2,
+  .burst_heartbeat_count_max = 4,
+  .burst_silence_min = 90s,
+  .burst_silence_max = 240s,
+  .burst_interval = 500ms,
   .heartbeat_entropy_normalization = true
 };
 ```
 
 **Special Features:**
+- **Burst Mode Heartbeats:** Sends 2-4 heartbeats rapidly (500ms apart), then silent for 90-240 seconds
+- **Maximum Unpredictability:** Breaks all temporal correlation patterns
 - Aggressive fragmentation (split messages more frequently)
 - No regular patterns whatsoever
 - Simulates packet loss recovery patterns
@@ -206,12 +231,18 @@ ObfuscationProfile trickle_mode{
   .use_advanced_padding = true,
   .timing_jitter_model = TimingJitterModel::kPoisson,
   .timing_jitter_scale = 1.2f,
-  .heartbeat_type = HeartbeatType::kTimestamp,  // Minimal heartbeat data
+  .heartbeat_type = HeartbeatType::kMimicDNS,  // DNS-like heartbeats
+  .heartbeat_timing_model = HeartbeatTimingModel::kExponential,
+  .exponential_mean_seconds = 180.0f,  // Very infrequent (3 minute average)
+  .exponential_max_gap = 600s,  // Up to 10 minutes
+  .exponential_long_gap_probability = 0.3f,
   .heartbeat_entropy_normalization = false  // Low entropy for IoT-like traffic
 };
 ```
 
 **Special Features:**
+- **DNS-Like Heartbeats:** Mimics DNS response structure to blend with common background traffic
+- **Very Infrequent Heartbeats:** Exponential distribution with 3-minute average, up to 10-minute gaps
 - Rate limiting: 10-50 kbit/s enforced at application layer
 - Delay injection: 100-500ms between packets
 - No retransmission bursts (use longer timeouts instead)
@@ -219,6 +250,88 @@ ObfuscationProfile trickle_mode{
 **Use Case:** Situations where any traffic spike triggers DPI alerts.
 
 ---
+
+## Heartbeat Obfuscation
+
+VEIL's heartbeat mechanism has been enhanced to prevent DPI detection through pattern analysis. Each mode uses different timing models and payload types to defeat various detection vectors.
+
+### Heartbeat Timing Models
+
+Three timing models are available via the `HeartbeatTimingModel` enum:
+
+#### 1. Uniform Distribution (kUniform)
+- **Behavior:** Classic uniform random distribution between `heartbeat_min` and `heartbeat_max`
+- **Use Case:** Backward compatibility, basic unpredictability
+- **Detection Resistance:** Limited - statistical analysis can still identify periodicity
+
+#### 2. Exponential Distribution (kExponential)
+- **Behavior:** Uses exponential distribution with configurable mean and occasional long gaps
+- **Formula:** `interval = -mean * ln(1 - U)` where U ∈ [0,1)
+- **Configuration Parameters:**
+  - `exponential_mean_seconds`: Average interval in seconds
+  - `exponential_max_gap`: Maximum gap duration for long pauses
+  - `exponential_long_gap_probability`: Probability (0.0-1.0) of triggering a long gap
+- **Detection Resistance:** Excellent - chaotic timing defeats autocorrelation analysis
+- **Used By:** IoT Mimic, QUIC-Like, Trickle modes
+
+**Example:** With mean=15s, max_gap=60s, probability=0.15:
+- Most intervals follow exponential distribution around 15s
+- 15% of the time, random gap between 0-60s is inserted
+- No predictable periodicity
+
+#### 3. Burst Mode (kBurst)
+- **Behavior:** Sends multiple heartbeats rapidly in bursts, then long silence
+- **Configuration Parameters:**
+  - `burst_heartbeat_count_min/max`: Number of heartbeats per burst
+  - `burst_silence_min/max`: Silence duration between bursts
+  - `burst_interval`: Delay between heartbeats within a burst
+- **Detection Resistance:** Excellent - breaks temporal correlation patterns
+- **Used By:** Random-Noise mode
+
+**Example:** With count=[2,4], silence=[90s,240s], interval=500ms:
+- Sends 2-4 heartbeats at 500ms intervals (a 1-2 second burst)
+- Then silent for 90-240 seconds
+- Pattern is completely non-periodic
+
+### Heartbeat Payload Types
+
+Eight payload types are available via the `HeartbeatType` enum:
+
+| Type | Description | Size | Detection Resistance |
+|------|-------------|------|---------------------|
+| **kEmpty** | Minimal empty heartbeat | ~8 bytes | Low (predictable size) |
+| **kTimestamp** | Contains timestamp only | 8 bytes | Low (fixed size) |
+| **kIoTSensor** | IoT sensor data (temp/humidity/battery) | 24 bytes | Medium (structured but varied) |
+| **kGenericTelemetry** | Generic telemetry pattern | 24 bytes | Medium (structured but varied) |
+| **kRandomSize** | Random payload size | 8-200 bytes | **Excellent** (defeats size fingerprinting) |
+| **kMimicDNS** | DNS response structure | Variable | **Excellent** (blends with DNS traffic) |
+| **kMimicSTUN** | STUN binding response (RFC 5389) | Variable | **Excellent** (blends with WebRTC) |
+| **kMimicRTP** | RTP keepalive packet (RFC 3550) | Variable | **Excellent** (blends with VoIP) |
+
+### Detection Vectors Addressed
+
+The enhanced heartbeat system addresses three main detection vectors identified in issue #22:
+
+1. **Regular Timing Pattern**
+   - ❌ Old: Uniform distribution [5s, 15s] created periodic traffic
+   - ✅ New: Exponential and burst modes eliminate periodicity
+
+2. **Fixed Payload Structure**
+   - ❌ Old: IoT payload had predictable 24-byte structure
+   - ✅ New: Random-size and protocol-mimic payloads vary structure
+
+3. **Encrypted Size Pattern**
+   - ❌ Old: Heartbeat packets had consistent sizes
+   - ✅ New: Variable payload types defeat size-based fingerprinting
+
+### Configuration Summary by Mode
+
+| Mode | Timing Model | Payload Type | Key Parameters |
+|------|-------------|--------------|----------------|
+| **IoT Mimic** | Exponential | IoTSensor | mean=15s, max_gap=60s, prob=15% |
+| **QUIC-Like** | Exponential | RandomSize | mean=45s, max_gap=180s, prob=20% |
+| **Random Noise** | Burst | RandomSize | burst=2-4, silence=90-240s |
+| **Trickle** | Exponential | MimicDNS | mean=180s, max_gap=600s, prob=30% |
 
 ## Implementation Details
 
@@ -367,8 +480,11 @@ For each mode, validate:
 | **Statistical Analysis** | ✅ Good | ✅ Excellent | ✅ Excellent | ✅ Good |
 | **Protocol Fingerprinting** | ❌ Limited | ✅ **Yes (WebSocket)** | ❌ Limited | ❌ Limited |
 | **Timing-based Detection** | ✅ Good | ✅ Good | ✅ Excellent | ✅ Excellent |
+| **Heartbeat Pattern Detection** | ✅ **Excellent** | ✅ **Excellent** | ✅ **Excellent** | ✅ **Excellent** |
 | **Size-based Detection** | ✅ Good | ✅ Excellent | ✅ Excellent | ⚠️ Limited (intentionally small) |
 | **Behavioral Heuristics** | ✅ Good | ✅ Good | ⚠️ May look suspicious | ✅ Excellent |
+
+**Note:** All modes now use non-periodic heartbeat timing to prevent pattern-based detection (Issue #22).
 
 ### Protocol Wrapper Status
 

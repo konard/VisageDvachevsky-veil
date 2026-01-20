@@ -428,4 +428,239 @@ TEST_F(ObfuscationProfileTest, ResetMetrics) {
   EXPECT_DOUBLE_EQ(metrics.avg_packet_size, 0.0);
 }
 
+// ========== Heartbeat Timing Model Tests ==========
+
+TEST_F(ObfuscationProfileTest, HeartbeatTimingUniformModel) {
+  profile_.heartbeat_timing_model = HeartbeatTimingModel::kUniform;
+  profile_.heartbeat_min = std::chrono::seconds(5);
+  profile_.heartbeat_max = std::chrono::seconds(15);
+
+  auto min_ms = std::chrono::duration_cast<std::chrono::milliseconds>(profile_.heartbeat_min).count();
+  auto max_ms = std::chrono::duration_cast<std::chrono::milliseconds>(profile_.heartbeat_max).count();
+
+  // Test that intervals are within bounds.
+  for (std::uint64_t count = 0; count < 1000; ++count) {
+    auto interval = compute_heartbeat_interval(profile_, count);
+    EXPECT_GE(interval.count(), min_ms);
+    EXPECT_LE(interval.count(), max_ms);
+  }
+}
+
+TEST_F(ObfuscationProfileTest, HeartbeatTimingExponentialModel) {
+  profile_.heartbeat_timing_model = HeartbeatTimingModel::kExponential;
+  profile_.exponential_mean_seconds = 10.0f;
+  profile_.exponential_max_gap = std::chrono::seconds(60);
+  profile_.exponential_long_gap_probability = 0.1f;
+
+  std::uint64_t long_gap_count = 0;
+  std::uint64_t total_count = 1000;
+
+  // Test that exponential intervals are non-periodic.
+  for (std::uint64_t count = 0; count < total_count; ++count) {
+    auto interval = compute_heartbeat_interval_exponential(profile_, count);
+
+    // Should be at least 1 second.
+    EXPECT_GE(interval.count(), 1000);
+
+    // Should not exceed max gap.
+    EXPECT_LE(interval.count(), 60000);
+
+    // Count long gaps (> 30 seconds).
+    if (interval.count() > 30000) {
+      ++long_gap_count;
+    }
+  }
+
+  // Should have some long gaps (roughly 10% based on probability).
+  // Allow tolerance: 5-20%.
+  EXPECT_GT(long_gap_count, 30U);   // At least 3%
+  EXPECT_LT(long_gap_count, 300U);  // At most 30%
+}
+
+TEST_F(ObfuscationProfileTest, HeartbeatTimingBurstModel) {
+  profile_.heartbeat_timing_model = HeartbeatTimingModel::kBurst;
+  profile_.burst_heartbeat_count_min = 3;
+  profile_.burst_heartbeat_count_max = 5;
+  profile_.burst_silence_min = std::chrono::seconds(30);
+  profile_.burst_silence_max = std::chrono::seconds(60);
+  profile_.burst_interval = std::chrono::milliseconds(200);
+
+  // Test burst pattern over one cycle.
+  bool is_burst_start = false;
+  std::vector<std::chrono::milliseconds> intervals;
+
+  for (std::uint64_t count = 0; count < 20; ++count) {
+    auto interval = compute_heartbeat_interval_burst(profile_, count, is_burst_start);
+    intervals.push_back(interval);
+  }
+
+  // Should have mix of short (burst) and long (silence) intervals.
+  bool has_short = false;
+  bool has_long = false;
+
+  for (const auto& interval : intervals) {
+    if (interval.count() < 1000) {  // Less than 1 second = burst interval
+      has_short = true;
+    }
+    if (interval.count() > 10000) {  // More than 10 seconds = silence interval
+      has_long = true;
+    }
+  }
+
+  EXPECT_TRUE(has_short);
+  EXPECT_TRUE(has_long);
+}
+
+TEST_F(ObfuscationProfileTest, HeartbeatTimingModelsDeterministic) {
+  // Test that timing models produce deterministic results.
+  profile_.heartbeat_timing_model = HeartbeatTimingModel::kExponential;
+
+  for (std::uint64_t count = 0; count < 100; ++count) {
+    auto interval1 = compute_heartbeat_interval(profile_, count);
+    auto interval2 = compute_heartbeat_interval(profile_, count);
+    EXPECT_EQ(interval1, interval2);
+  }
+}
+
+// ========== New Heartbeat Payload Type Tests ==========
+
+TEST_F(ObfuscationProfileTest, GenerateRandomSizeHeartbeatPayload) {
+  profile_.heartbeat_type = HeartbeatType::kRandomSize;
+
+  auto payload1 = generate_random_size_heartbeat_payload(profile_, 0);
+  auto payload2 = generate_random_size_heartbeat_payload(profile_, 1);
+
+  // Payloads should be between 8 and 200 bytes.
+  EXPECT_GE(payload1.size(), 8U);
+  EXPECT_LE(payload1.size(), 200U);
+  EXPECT_GE(payload2.size(), 8U);
+  EXPECT_LE(payload2.size(), 200U);
+
+  // Different sequences should produce different payloads.
+  EXPECT_NE(payload1, payload2);
+
+  // Same sequence should produce same payload.
+  auto payload1_again = generate_random_size_heartbeat_payload(profile_, 0);
+  EXPECT_EQ(payload1, payload1_again);
+}
+
+TEST_F(ObfuscationProfileTest, GenerateDNSMimicHeartbeatPayload) {
+  profile_.heartbeat_type = HeartbeatType::kMimicDNS;
+
+  auto payload = generate_dns_mimic_heartbeat_payload(profile_, 0);
+
+  // DNS response should be at least 12 bytes (header) + question + answer.
+  EXPECT_GT(payload.size(), 12U);
+
+  // Check DNS header flags (offset 2-3).
+  // Should have QR=1 (response), RCODE=0 (no error).
+  EXPECT_EQ(payload[2] & 0x80, 0x80);  // QR bit set
+  EXPECT_EQ(payload[3] & 0x0F, 0x00);  // RCODE = 0
+
+  // Check QDCOUNT (offset 4-5): should be 1 question.
+  EXPECT_EQ(payload[4], 0x00);
+  EXPECT_EQ(payload[5], 0x01);
+
+  // Check ANCOUNT (offset 6-7): should be 1 answer.
+  EXPECT_EQ(payload[6], 0x00);
+  EXPECT_EQ(payload[7], 0x01);
+}
+
+TEST_F(ObfuscationProfileTest, GenerateSTUNMimicHeartbeatPayload) {
+  profile_.heartbeat_type = HeartbeatType::kMimicSTUN;
+
+  auto payload = generate_stun_mimic_heartbeat_payload(profile_, 0);
+
+  // STUN message should have 20-byte header + attributes.
+  EXPECT_GE(payload.size(), 20U);
+
+  // Check message type (offset 0-1): should be 0x0101 (Binding Response Success).
+  EXPECT_EQ(payload[0], 0x01);
+  EXPECT_EQ(payload[1], 0x01);
+
+  // Check magic cookie (offset 4-7): should be 0x2112A442.
+  EXPECT_EQ(payload[4], 0x21);
+  EXPECT_EQ(payload[5], 0x12);
+  EXPECT_EQ(payload[6], 0xA4);
+  EXPECT_EQ(payload[7], 0x42);
+}
+
+TEST_F(ObfuscationProfileTest, GenerateRTPMimicHeartbeatPayload) {
+  profile_.heartbeat_type = HeartbeatType::kMimicRTP;
+
+  auto payload = generate_rtp_mimic_heartbeat_payload(profile_, 0);
+
+  // RTP header should be exactly 12 bytes.
+  EXPECT_EQ(payload.size(), 12U);
+
+  // Check version (offset 0, bits 6-7): should be 2.
+  EXPECT_EQ((payload[0] >> 6) & 0x03, 2);
+
+  // Check payload type (offset 1, bits 0-6): should be 96.
+  EXPECT_EQ(payload[1] & 0x7F, 96);
+}
+
+TEST_F(ObfuscationProfileTest, GenerateHeartbeatPayloadByNewTypes) {
+  // Test that generate_heartbeat_payload dispatches correctly to new types.
+
+  profile_.heartbeat_type = HeartbeatType::kRandomSize;
+  auto random_payload = generate_heartbeat_payload(profile_, 0);
+  EXPECT_GE(random_payload.size(), 8U);
+  EXPECT_LE(random_payload.size(), 200U);
+
+  profile_.heartbeat_type = HeartbeatType::kMimicDNS;
+  auto dns_payload = generate_heartbeat_payload(profile_, 0);
+  EXPECT_GT(dns_payload.size(), 12U);
+
+  profile_.heartbeat_type = HeartbeatType::kMimicSTUN;
+  auto stun_payload = generate_heartbeat_payload(profile_, 0);
+  EXPECT_GE(stun_payload.size(), 20U);
+
+  profile_.heartbeat_type = HeartbeatType::kMimicRTP;
+  auto rtp_payload = generate_heartbeat_payload(profile_, 0);
+  EXPECT_EQ(rtp_payload.size(), 12U);
+}
+
+TEST_F(ObfuscationProfileTest, HeartbeatPayloadVarianceAcrossSequences) {
+  // Test that payloads vary across different sequences (non-predictable).
+  profile_.heartbeat_type = HeartbeatType::kRandomSize;
+
+  std::set<std::size_t> sizes;
+  for (std::uint64_t seq = 0; seq < 100; ++seq) {
+    auto payload = generate_heartbeat_payload(profile_, seq);
+    sizes.insert(payload.size());
+  }
+
+  // Should have good variance in sizes (at least 20 different sizes).
+  EXPECT_GE(sizes.size(), 20U);
+}
+
+// ========== DPI Mode Profile Tests for New Features ==========
+
+TEST_F(ObfuscationProfileTest, DPIModeIoTMimicUsesExponentialTiming) {
+  auto profile = create_dpi_mode_profile(DPIBypassMode::kIoTMimic);
+  EXPECT_EQ(profile.heartbeat_timing_model, HeartbeatTimingModel::kExponential);
+  EXPECT_GT(profile.exponential_mean_seconds, 0.0f);
+}
+
+TEST_F(ObfuscationProfileTest, DPIModeQUICLikeUsesVariedPayloads) {
+  auto profile = create_dpi_mode_profile(DPIBypassMode::kQUICLike);
+  EXPECT_EQ(profile.heartbeat_timing_model, HeartbeatTimingModel::kExponential);
+  EXPECT_EQ(profile.heartbeat_type, HeartbeatType::kRandomSize);
+}
+
+TEST_F(ObfuscationProfileTest, DPIModeRandomNoiseUsesBurstMode) {
+  auto profile = create_dpi_mode_profile(DPIBypassMode::kRandomNoise);
+  EXPECT_EQ(profile.heartbeat_timing_model, HeartbeatTimingModel::kBurst);
+  EXPECT_EQ(profile.heartbeat_type, HeartbeatType::kRandomSize);
+  EXPECT_GT(profile.burst_heartbeat_count_min, 0);
+  EXPECT_GT(profile.burst_heartbeat_count_max, 0);
+}
+
+TEST_F(ObfuscationProfileTest, DPIModeTrickleUsesDNSMimic) {
+  auto profile = create_dpi_mode_profile(DPIBypassMode::kTrickle);
+  EXPECT_EQ(profile.heartbeat_type, HeartbeatType::kMimicDNS);
+  EXPECT_EQ(profile.heartbeat_timing_model, HeartbeatTimingModel::kExponential);
+}
+
 }  // namespace veil::obfuscation::tests
