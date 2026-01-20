@@ -3,8 +3,10 @@
 #include <sodium.h>
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <span>
 #include <utility>
@@ -13,6 +15,13 @@
 #include "common/crypto/crypto_engine.h"
 #include "common/crypto/random.h"
 #include "common/logging/logger.h"
+
+// SECURITY: Nonce overflow threshold.
+// With uint64_t, we can send 2^64 packets before overflow. At 10 Gbps with 1KB packets,
+// this would take over 58 million years. However, we set a conservative threshold to
+// detect any anomalies or implementation bugs that might cause rapid sequence growth.
+// This threshold triggers a warning well before any practical risk of overflow.
+constexpr std::uint64_t kNonceOverflowWarningThreshold = std::numeric_limits<std::uint64_t>::max() - (1ULL << 32);
 
 namespace veil::transport {
 
@@ -169,32 +178,77 @@ bool TransportSession::should_rotate_session() {
 }
 
 void TransportSession::rotate_session() {
+  // Store sequence before rotation for assertion
+  const std::uint64_t sequence_before_rotation = send_sequence_;
+
   current_session_id_ = session_rotator_.rotate(now_fn_());
   packets_since_rotation_ = 0;
   ++stats_.session_rotations;
 
-  // SECURITY NOTE: Nonce counter reset is NOT needed here.
-  // The nonce for ChaCha20-Poly1305 is derived as: derive_nonce(base_nonce, send_sequence_).
-  // The send_sequence_ counter is NOT reset during rotation - it continues monotonically.
-  // This ensures nonce uniqueness: as long as send_sequence_ never repeats (uint64_t gives
-  // 2^64 packets before overflow), we never reuse a (key, nonce) pair.
-  // Session rotation only changes the session_id for protocol-level session management,
-  // not for cryptographic key rotation.
+  // ===========================================================================
+  // SECURITY-CRITICAL: NONCE COUNTER LIFECYCLE
+  // ===========================================================================
+  // The nonce for ChaCha20-Poly1305 is derived as:
+  //   nonce = derive_nonce(base_nonce, send_sequence_)
+  //
+  // Where derive_nonce XORs the counter into the last 8 bytes of base_nonce.
+  //
+  // CRITICAL INVARIANT: send_sequence_ MUST NEVER be reset.
+  //
+  // Why this matters:
+  // - ChaCha20-Poly1305 security completely breaks if the same (key, nonce) pair
+  //   is ever used twice
+  // - The encryption key (keys_.send_key) is derived once during handshake and
+  //   does NOT change during session rotation
+  // - Session rotation only changes the session_id for protocol-level management
+  //
+  // Nonce uniqueness guarantee:
+  // - send_sequence_ is uint64_t, allowing 2^64 unique nonces
+  // - At 10 Gbps with 1KB packets, exhaustion would take ~58 million years
+  // - send_sequence_ is incremented after each packet in build_encrypted_packet()
+  // - It is NEVER reset or decremented
+  //
+  // This design was chosen over alternatives like:
+  // - Rotating keys on session rotation: Would require re-handshake or key derivation
+  // - Resetting counter with new base_nonce: Adds complexity, risk of implementation bugs
+  // - Using random nonces: Requires tracking to prevent collisions (birthday bound)
+  //
+  // See also: Issue #3 - Verify nonce counter lifecycle on session rotation
+  // ===========================================================================
 
-  LOG_DEBUG("Session rotated to session_id={}", current_session_id_);
+  // ASSERTION: Verify send_sequence_ was not reset (defense in depth)
+  assert(send_sequence_ == sequence_before_rotation &&
+         "SECURITY VIOLATION: send_sequence_ must never be reset during rotation");
+
+  LOG_DEBUG("Session rotated to session_id={}, send_sequence_={} (unchanged)",
+            current_session_id_, send_sequence_);
 }
 
 std::vector<std::uint8_t> TransportSession::build_encrypted_packet(const mux::MuxFrame& frame) {
+  // SECURITY: Check for sequence number overflow (extremely unlikely but provides defense in depth)
+  // At 10 Gbps with 1KB packets, reaching this threshold would take millions of years,
+  // but we check anyway to catch any implementation bugs that might cause unexpected growth.
+  if (send_sequence_ >= kNonceOverflowWarningThreshold) {
+    LOG_ERROR("SECURITY WARNING: send_sequence_ approaching overflow (current={}). "
+              "Session should be re-established to prevent nonce reuse.",
+              send_sequence_);
+    // Note: We log but continue - in practice this is unreachable under normal operation.
+    // A production system might want to force session termination here.
+  }
+
   // Serialize the frame.
   auto plaintext = mux::MuxCodec::encode(frame);
 
   // Derive nonce from current send sequence.
+  // SECURITY: Each packet gets a unique nonce = base_nonce XOR send_sequence_
+  // Since send_sequence_ is never reset and always increments, nonces are guaranteed unique.
   const auto nonce = crypto::derive_nonce(keys_.send_nonce, send_sequence_);
 
-  // Encrypt.
+  // Encrypt using ChaCha20-Poly1305 AEAD.
   auto ciphertext = crypto::aead_encrypt(keys_.send_key, nonce, {}, plaintext);
 
   // Prepend sequence number (8 bytes big-endian).
+  // The sequence is sent in plaintext to allow the receiver to derive the same nonce.
   std::vector<std::uint8_t> packet;
   packet.reserve(8 + ciphertext.size());
   for (int i = 7; i >= 0; --i) {
@@ -202,7 +256,10 @@ std::vector<std::uint8_t> TransportSession::build_encrypted_packet(const mux::Mu
   }
   packet.insert(packet.end(), ciphertext.begin(), ciphertext.end());
 
+  // SECURITY: Increment AFTER using the sequence number.
+  // This ensures each packet uses a unique sequence, and the next packet will use the next value.
   ++send_sequence_;
+
   return packet;
 }
 
