@@ -260,9 +260,11 @@ TEST_F(ActiveProbingTest, SilentDropTamperedHmac) {
   handshake::HandshakeInitiator initiator(get_test_psk(), 200ms, get_now_fn());
   auto init = initiator.create_init();
 
-  // Corrupt HMAC (last 32 bytes)
-  if (init.size() >= 32) {
-    init[init.size() - 1] ^= 0xFF;
+  // Corrupt HMAC (at fixed offset: after magic[2] + version[1] + type[1] + timestamp[8] + ephemeral_key[32])
+  // HMAC is at bytes 44-75
+  constexpr std::size_t hmac_offset = 2 + 1 + 1 + 8 + 32;  // = 44
+  if (init.size() > hmac_offset) {
+    init[hmac_offset] ^= 0xFF;  // Corrupt first byte of HMAC
   }
 
   auto result = responder_->handle_init(init);
@@ -320,9 +322,12 @@ TEST_F(ActiveProbingTest, ConstantTimeResponse) {
   handshake::HandshakeInitiator initiator(get_test_psk(), 200ms, get_now_fn());
   auto valid_init = initiator.create_init();
 
-  // Invalid INIT - corrupt the encrypted ciphertext (last byte before AEAD tag)
+  // Invalid INIT - corrupt the encrypted ciphertext (AEAD will fail to decrypt)
   auto invalid_init = valid_init;
-  invalid_init[invalid_init.size() - 1] ^= 0xFF;
+  constexpr std::size_t hmac_offset = 2 + 1 + 1 + 8 + 32;  // = 44
+  if (invalid_init.size() > hmac_offset) {
+    invalid_init[hmac_offset] ^= 0xFF;  // Corrupt first byte of HMAC
+  }
 
   // Measure timing for multiple attempts
   std::vector<double> valid_times;
