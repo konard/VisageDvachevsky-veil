@@ -35,6 +35,8 @@ bool EventLoop::add_socket(UdpSocket* socket, SessionId session_id, const UdpEnd
                            PacketHandler on_packet, TimerHandler on_ack_timeout,
                            TimerHandler on_retransmit, TimerHandler on_idle_timeout,
                            ErrorHandler on_error) {
+  VEIL_DCHECK_THREAD(thread_checker_);
+
   if (socket == nullptr || epoll_fd_ < 0) {
     return false;
   }
@@ -83,6 +85,8 @@ bool EventLoop::add_socket(UdpSocket* socket, SessionId session_id, const UdpEnd
 }
 
 bool EventLoop::remove_socket(int fd) {
+  VEIL_DCHECK_THREAD(thread_checker_);
+
   auto it = sockets_.find(fd);
   if (it == sockets_.end()) {
     return false;
@@ -103,6 +107,8 @@ bool EventLoop::remove_socket(int fd) {
 }
 
 bool EventLoop::send_packet(int fd, std::span<const std::uint8_t> data, const UdpEndpoint& remote) {
+  VEIL_DCHECK_THREAD(thread_checker_);
+
   auto it = sockets_.find(fd);
   if (it == sockets_.end()) {
     return false;
@@ -136,12 +142,18 @@ bool EventLoop::send_packet(int fd, std::span<const std::uint8_t> data, const Ud
 
 utils::TimerId EventLoop::schedule_timer(std::chrono::steady_clock::duration after,
                                          utils::TimerCallback callback) {
+  VEIL_DCHECK_THREAD(thread_checker_);
   return timer_heap_.schedule_after(after, std::move(callback));
 }
 
-bool EventLoop::cancel_timer(utils::TimerId id) { return timer_heap_.cancel(id); }
+bool EventLoop::cancel_timer(utils::TimerId id) {
+  VEIL_DCHECK_THREAD(thread_checker_);
+  return timer_heap_.cancel(id);
+}
 
 void EventLoop::reset_idle_timeout(int fd) {
+  VEIL_DCHECK_THREAD(thread_checker_);
+
   auto it = sockets_.find(fd);
   if (it == sockets_.end()) {
     return;
@@ -161,6 +173,10 @@ void EventLoop::run() {
     LOG_ERROR("Cannot run event loop: invalid epoll fd");
     return;
   }
+
+  // Bind thread checker to the current thread (the event loop thread).
+  // All subsequent operations on this EventLoop must happen on this thread.
+  thread_checker_.rebind_to_current();
 
   running_.store(true);
   LOG_INFO("Event loop started");

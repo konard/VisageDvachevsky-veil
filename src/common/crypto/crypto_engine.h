@@ -48,6 +48,22 @@ SessionKeys derive_session_keys(std::span<const std::uint8_t, kSharedSecretSize>
 std::array<std::uint8_t, kNonceLen> derive_nonce(
     std::span<const std::uint8_t, kNonceLen> base_nonce, std::uint64_t counter);
 
+// Derive a key for sequence number obfuscation from session keys.
+// This creates a deterministic but unique key per session for DPI resistance.
+std::array<std::uint8_t, kAeadKeyLen> derive_sequence_obfuscation_key(
+    std::span<const std::uint8_t, kAeadKeyLen> send_key,
+    std::span<const std::uint8_t, kNonceLen> send_nonce);
+
+// Obfuscate sequence number for transmission (sender side).
+// Uses ChaCha20 with the obfuscation key to make sequences indistinguishable from random.
+std::uint64_t obfuscate_sequence(std::uint64_t sequence,
+                                  std::span<const std::uint8_t, kAeadKeyLen> obfuscation_key);
+
+// Deobfuscate sequence number after reception (receiver side).
+// Reverses the obfuscation to recover the original sequence for nonce derivation.
+std::uint64_t deobfuscate_sequence(std::uint64_t obfuscated_sequence,
+                                    std::span<const std::uint8_t, kAeadKeyLen> obfuscation_key);
+
 std::vector<std::uint8_t> aead_encrypt(std::span<const std::uint8_t, kAeadKeyLen> key,
                                        std::span<const std::uint8_t, kNonceLen> nonce,
                                        std::span<const std::uint8_t> aad,
