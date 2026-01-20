@@ -200,7 +200,7 @@ bool TransportSession::should_rotate_session() {
 void TransportSession::rotate_session() {
   VEIL_DCHECK_THREAD(thread_checker_);
 
-  // Save sequence number before rotation for assertion check
+  // SECURITY: Capture sequence number before rotation for verification
   const auto sequence_before_rotation = send_sequence_;
 
   current_session_id_ = session_rotator_.rotate(now_fn_());
