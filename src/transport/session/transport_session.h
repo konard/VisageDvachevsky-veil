@@ -137,6 +137,11 @@ class TransportSession {
   crypto::SessionKeys keys_;
   std::uint64_t current_session_id_;
 
+  // DPI resistance: Keys for obfuscating sequence numbers (Issue #21).
+  // These are derived from session keys to prevent traffic analysis.
+  std::array<std::uint8_t, crypto::kAeadKeyLen> send_seq_obfuscation_key_;
+  std::array<std::uint8_t, crypto::kAeadKeyLen> recv_seq_obfuscation_key_;
+
   // Sequence counters.
   // SECURITY-CRITICAL: send_sequence_ is used for nonce derivation.
   // It MUST NEVER be reset - it continues monotonically across session rotations.

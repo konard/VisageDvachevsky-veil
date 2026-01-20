@@ -84,4 +84,101 @@ TEST(CryptoEngineTests, DecryptFailureOnTamper) {
   EXPECT_FALSE(decrypted.has_value());
 }
 
+// Issue #21: Sequence number obfuscation tests for DPI resistance
+TEST(CryptoEngineTests, SequenceObfuscationRoundTrip) {
+  const auto key_vec = crypto::random_bytes(crypto::kAeadKeyLen);
+  std::array<std::uint8_t, crypto::kAeadKeyLen> key{};
+  std::copy(key_vec.begin(), key_vec.end(), key.begin());
+
+  // Test various sequence values
+  const std::vector<std::uint64_t> test_sequences = {
+      0, 1, 42, 0x1234567890ABCDEF, std::numeric_limits<std::uint64_t>::max()
+  };
+
+  for (const auto original_seq : test_sequences) {
+    const auto obfuscated = crypto::obfuscate_sequence(original_seq, key);
+    const auto deobfuscated = crypto::deobfuscate_sequence(obfuscated, key);
+    EXPECT_EQ(original_seq, deobfuscated)
+        << "Failed round-trip for sequence " << original_seq;
+  }
+}
+
+TEST(CryptoEngineTests, SequenceObfuscationProducesRandomLookingOutput) {
+  const auto key_vec = crypto::random_bytes(crypto::kAeadKeyLen);
+  std::array<std::uint8_t, crypto::kAeadKeyLen> key{};
+  std::copy(key_vec.begin(), key_vec.end(), key.begin());
+
+  // Consecutive sequences should not produce consecutive obfuscated values
+  // (which would be detectable by DPI)
+  const std::uint64_t seq1 = 1000;
+  const std::uint64_t seq2 = 1001;
+  const std::uint64_t seq3 = 1002;
+
+  const auto obf1 = crypto::obfuscate_sequence(seq1, key);
+  const auto obf2 = crypto::obfuscate_sequence(seq2, key);
+  const auto obf3 = crypto::obfuscate_sequence(seq3, key);
+
+  // Obfuscated values should be very different despite small input differences
+  EXPECT_NE(obf1, obf2);
+  EXPECT_NE(obf2, obf3);
+  EXPECT_NE(obf1, obf3);
+
+  // The differences should be large (not just +1)
+  EXPECT_GT(std::abs(static_cast<std::int64_t>(obf2 - obf1)), 1000);
+  EXPECT_GT(std::abs(static_cast<std::int64_t>(obf3 - obf2)), 1000);
+}
+
+TEST(CryptoEngineTests, SequenceObfuscationDiffersByKey) {
+  const auto key1_vec = crypto::random_bytes(crypto::kAeadKeyLen);
+  const auto key2_vec = crypto::random_bytes(crypto::kAeadKeyLen);
+
+  std::array<std::uint8_t, crypto::kAeadKeyLen> key1{};
+  std::array<std::uint8_t, crypto::kAeadKeyLen> key2{};
+  std::copy(key1_vec.begin(), key1_vec.end(), key1.begin());
+  std::copy(key2_vec.begin(), key2_vec.end(), key2.begin());
+
+  const std::uint64_t sequence = 12345;
+
+  const auto obf1 = crypto::obfuscate_sequence(sequence, key1);
+  const auto obf2 = crypto::obfuscate_sequence(sequence, key2);
+
+  // Same sequence with different keys should produce different obfuscated values
+  EXPECT_NE(obf1, obf2);
+}
+
+TEST(CryptoEngineTests, DeriveSequenceObfuscationKeyProducesDifferentKeys) {
+  const auto send_key1_vec = crypto::random_bytes(crypto::kAeadKeyLen);
+  const auto send_key2_vec = crypto::random_bytes(crypto::kAeadKeyLen);
+  const auto nonce_vec = crypto::random_bytes(crypto::kNonceLen);
+
+  std::array<std::uint8_t, crypto::kAeadKeyLen> send_key1{};
+  std::array<std::uint8_t, crypto::kAeadKeyLen> send_key2{};
+  std::array<std::uint8_t, crypto::kNonceLen> nonce{};
+  std::copy(send_key1_vec.begin(), send_key1_vec.end(), send_key1.begin());
+  std::copy(send_key2_vec.begin(), send_key2_vec.end(), send_key2.begin());
+  std::copy(nonce_vec.begin(), nonce_vec.end(), nonce.begin());
+
+  const auto obf_key1 = crypto::derive_sequence_obfuscation_key(send_key1, nonce);
+  const auto obf_key2 = crypto::derive_sequence_obfuscation_key(send_key2, nonce);
+
+  // Different session keys should produce different obfuscation keys
+  EXPECT_NE(obf_key1, obf_key2);
+}
+
+TEST(CryptoEngineTests, DeriveSequenceObfuscationKeyIsDeterministic) {
+  const auto send_key_vec = crypto::random_bytes(crypto::kAeadKeyLen);
+  const auto nonce_vec = crypto::random_bytes(crypto::kNonceLen);
+
+  std::array<std::uint8_t, crypto::kAeadKeyLen> send_key{};
+  std::array<std::uint8_t, crypto::kNonceLen> nonce{};
+  std::copy(send_key_vec.begin(), send_key_vec.end(), send_key.begin());
+  std::copy(nonce_vec.begin(), nonce_vec.end(), nonce.begin());
+
+  const auto obf_key1 = crypto::derive_sequence_obfuscation_key(send_key, nonce);
+  const auto obf_key2 = crypto::derive_sequence_obfuscation_key(send_key, nonce);
+
+  // Same inputs should produce the same obfuscation key
+  EXPECT_EQ(obf_key1, obf_key2);
+}
+
 }  // namespace veil::tests
