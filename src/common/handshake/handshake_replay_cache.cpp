@@ -22,7 +22,7 @@ bool HandshakeReplayCache::mark_and_check(
   // This is a simple heuristic to avoid cleanup overhead on every call
   static thread_local std::size_t call_count = 0;
   if (++call_count % 100 == 0) {
-    cleanup_expired(timestamp_ms);
+    cleanup_expired_locked(timestamp_ms);
   }
 
   CacheKey key{.timestamp_ms = timestamp_ms, .ephemeral_key = ephemeral_key};
@@ -51,7 +51,11 @@ bool HandshakeReplayCache::mark_and_check(
 
 std::size_t HandshakeReplayCache::cleanup_expired(std::uint64_t current_time_ms) {
   std::lock_guard<std::mutex> lock(mutex_);
+  return cleanup_expired_locked(current_time_ms);
+}
 
+std::size_t HandshakeReplayCache::cleanup_expired_locked(std::uint64_t current_time_ms) {
+  // Assumes mutex is already held by caller
   std::size_t removed = 0;
   const std::uint64_t cutoff_ms =
       current_time_ms > static_cast<std::uint64_t>(time_window_.count())
