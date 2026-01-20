@@ -414,4 +414,157 @@ TEST_F(TransportSessionTest, PacketCountBasedRotationPreservesSequence) {
   EXPECT_EQ(client.send_sequence(), 6U);
 }
 
+// =============================================================================
+// SEQUENCE OBFUSCATION TESTS (Issue #21)
+// These tests verify that sequence numbers are properly obfuscated to prevent
+// DPI detection based on monotonically increasing plaintext sequences.
+// =============================================================================
+
+TEST_F(TransportSessionTest, SequenceNumbersAreObfuscatedInWireFormat) {
+  // Verifies that the first 8 bytes of encrypted packets do NOT contain
+  // the plaintext sequence number. This prevents DPI from detecting monotonic
+  // sequences which would reveal encrypted tunnel usage.
+  auto now_fn = [this]() { return steady_now_; };
+
+  transport::TransportSession client(client_handshake_, {}, now_fn);
+
+  // Send multiple packets and collect their wire representations
+  std::vector<std::vector<std::uint8_t>> packets;
+  for (int i = 0; i < 10; ++i) {
+    std::vector<std::uint8_t> data{static_cast<std::uint8_t>(i)};
+    auto encrypted = client.encrypt_data(data, 0, false);
+    ASSERT_EQ(encrypted.size(), 1U);
+    packets.push_back(encrypted[0]);
+  }
+
+  // Extract the first 8 bytes from each packet (the obfuscated sequence)
+  std::vector<std::uint64_t> wire_sequences;
+  for (const auto& pkt : packets) {
+    ASSERT_GE(pkt.size(), 8U);
+    std::uint64_t wire_seq = 0;
+    for (int i = 0; i < 8; ++i) {
+      wire_seq = (wire_seq << 8) | pkt[static_cast<std::size_t>(i)];
+    }
+    wire_sequences.push_back(wire_seq);
+  }
+
+  // Verify that wire sequences are NOT monotonically increasing
+  // (i.e., they are properly obfuscated)
+  bool is_monotonic = true;
+  for (std::size_t i = 1; i < wire_sequences.size(); ++i) {
+    if (wire_sequences[i] <= wire_sequences[i - 1]) {
+      is_monotonic = false;
+      break;
+    }
+  }
+
+  EXPECT_FALSE(is_monotonic)
+      << "Wire sequences appear monotonic, suggesting insufficient obfuscation";
+
+  // Verify that consecutive sequences have large differences (high entropy)
+  for (std::size_t i = 1; i < wire_sequences.size(); ++i) {
+    std::int64_t diff = static_cast<std::int64_t>(wire_sequences[i]) -
+                        static_cast<std::int64_t>(wire_sequences[i - 1]);
+    // If obfuscation is working, differences should be large and unpredictable
+    // For true randomness, we'd expect differences >> 1
+    EXPECT_NE(std::abs(diff), 1)
+        << "Consecutive obfuscated sequences differ by 1, suggesting weak obfuscation";
+  }
+}
+
+TEST_F(TransportSessionTest, ObfuscatedPacketsStillDecryptCorrectly) {
+  // Verifies that obfuscation doesn't break the decrypt path - the receiver
+  // should still be able to deobfuscate and decrypt packets normally.
+  auto client_now_fn = [this]() { return steady_now_; };
+  auto server_now_fn = [this]() { return steady_now_; };
+
+  transport::TransportSession client(client_handshake_, {}, client_now_fn);
+  transport::TransportSession server(server_handshake_, {}, server_now_fn);
+
+  // Send many packets to test obfuscation doesn't affect correctness
+  for (std::size_t i = 0; i < 100; ++i) {
+    std::vector<std::uint8_t> plaintext(100);
+    for (std::size_t j = 0; j < plaintext.size(); ++j) {
+      plaintext[j] = static_cast<std::uint8_t>((i + j) & 0xFF);
+    }
+
+    auto encrypted = client.encrypt_data(plaintext, 0, false);
+    ASSERT_EQ(encrypted.size(), 1U);
+
+    auto decrypted = server.decrypt_packet(encrypted[0]);
+    ASSERT_TRUE(decrypted.has_value());
+    ASSERT_EQ(decrypted->size(), 1U);
+    EXPECT_EQ((*decrypted)[0].data.payload, plaintext);
+  }
+
+  // Verify all packets were received successfully
+  EXPECT_EQ(server.stats().packets_received, 100U);
+  EXPECT_EQ(server.stats().packets_dropped_decrypt, 0U);
+  EXPECT_EQ(server.stats().packets_dropped_replay, 0U);
+}
+
+TEST_F(TransportSessionTest, DifferentSessionsProduceDifferentObfuscation) {
+  // Verifies that different sessions (with different keys) produce different
+  // obfuscated sequences, preventing correlation across sessions.
+  auto now_fn_sys = [this]() { return now_; };
+  auto now_fn_steady = [this]() { return steady_now_; };
+
+  // Create two independent handshake sessions
+  handshake::HandshakeInitiator initiator1(psk_, 200ms, now_fn_sys);
+  handshake::HandshakeInitiator initiator2(psk_, 200ms, now_fn_sys);
+
+  utils::TokenBucket bucket1(100.0, 1000ms, now_fn_steady);
+  utils::TokenBucket bucket2(100.0, 1000ms, now_fn_steady);
+
+  handshake::HandshakeResponder responder1(psk_, 200ms, std::move(bucket1), now_fn_sys);
+  handshake::HandshakeResponder responder2(psk_, 200ms, std::move(bucket2), now_fn_sys);
+
+  auto init1 = initiator1.create_init();
+  now_ += 10ms;
+  steady_now_ += 10ms;
+  auto resp1 = responder1.handle_init(init1);
+  ASSERT_TRUE(resp1.has_value());
+
+  now_ += 10ms;
+  steady_now_ += 10ms;
+  auto init2 = initiator2.create_init();
+  now_ += 10ms;
+  steady_now_ += 10ms;
+  auto resp2 = responder2.handle_init(init2);
+  ASSERT_TRUE(resp2.has_value());
+
+  now_ += 10ms;
+  steady_now_ += 10ms;
+  auto session1 = initiator1.consume_response(resp1->response);
+  ASSERT_TRUE(session1.has_value());
+
+  auto session2 = initiator2.consume_response(resp2->response);
+  ASSERT_TRUE(session2.has_value());
+
+  // Create transport sessions
+  transport::TransportSession transport1(*session1, {}, now_fn_steady);
+  transport::TransportSession transport2(*session2, {}, now_fn_steady);
+
+  // Send first packet from both sessions
+  std::vector<std::uint8_t> data{0x42};
+  auto pkt1 = transport1.encrypt_data(data, 0, false);
+  auto pkt2 = transport2.encrypt_data(data, 0, false);
+
+  ASSERT_EQ(pkt1.size(), 1U);
+  ASSERT_EQ(pkt2.size(), 1U);
+
+  // Extract first 8 bytes (obfuscated sequence) from each
+  std::uint64_t obf_seq1 = 0;
+  std::uint64_t obf_seq2 = 0;
+
+  for (int i = 0; i < 8; ++i) {
+    obf_seq1 = (obf_seq1 << 8) | pkt1[0][static_cast<std::size_t>(i)];
+    obf_seq2 = (obf_seq2 << 8) | pkt2[0][static_cast<std::size_t>(i)];
+  }
+
+  // Even though both sessions sent sequence 0, the obfuscated values should differ
+  EXPECT_NE(obf_seq1, obf_seq2)
+      << "Different sessions should produce different obfuscated sequences";
+}
+
 }  // namespace veil::tests

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
 #include <vector>
 
@@ -182,6 +183,163 @@ std::array<std::uint8_t, kNonceLen> derive_nonce(
   std::copy(base_nonce.begin(), base_nonce.end(), nonce.begin());
   shift_block(nonce, counter);
   return nonce;
+}
+
+std::array<std::uint8_t, kAeadKeyLen> derive_sequence_obfuscation_key(
+    std::span<const std::uint8_t, kAeadKeyLen> send_key,
+    std::span<const std::uint8_t, kNonceLen> send_nonce) {
+  ensure_sodium_ready();
+
+  // Use HKDF to derive a separate key for sequence obfuscation.
+  // We use send_key as the input key material (IKM) and a constant info string.
+  // The send_nonce is included in the info to ensure uniqueness per session.
+  constexpr const char* info_prefix = "veil-sequence-obfuscation-v1";
+
+  // Create info = info_prefix || send_nonce
+  std::vector<std::uint8_t> info;
+  info.reserve(std::strlen(info_prefix) + send_nonce.size());
+  info.insert(info.end(), info_prefix, info_prefix + std::strlen(info_prefix));
+  info.insert(info.end(), send_nonce.begin(), send_nonce.end());
+
+  // Extract phase with zero salt
+  auto prk = hkdf_extract({}, send_key);
+
+  // Expand to get obfuscation key
+  auto expanded = hkdf_expand(prk, info, kAeadKeyLen);
+
+  // SECURITY: Clear PRK immediately after use
+  sodium_memzero(prk.data(), prk.size());
+
+  std::array<std::uint8_t, kAeadKeyLen> obfuscation_key{};
+  std::copy_n(expanded.begin(), kAeadKeyLen, obfuscation_key.begin());
+
+  // SECURITY: Clear expanded material
+  sodium_memzero(expanded.data(), expanded.size());
+
+  return obfuscation_key;
+}
+
+std::uint64_t obfuscate_sequence(std::uint64_t sequence,
+                                  std::span<const std::uint8_t, kAeadKeyLen> obfuscation_key) {
+  ensure_sodium_ready();
+
+  // Use a simplified 3-round Feistel network to create a pseudorandom permutation.
+  // This is invertible and provides good obfuscation for DPI resistance.
+  // Split the 64-bit sequence into two 32-bit halves and apply Feistel rounds.
+
+  std::uint32_t left = static_cast<std::uint32_t>(sequence >> 32);
+  std::uint32_t right = static_cast<std::uint32_t>(sequence & 0xFFFFFFFF);
+
+  // Round 1
+  std::array<std::uint8_t, 4 + 1> round1_input{};
+  round1_input[0] = 1;  // Round number
+  for (std::size_t i = 0; i < 4; ++i) {
+    round1_input[1 + i] = static_cast<std::uint8_t>((right >> (8 * (3 - i))) & 0xFF);
+  }
+  std::array<std::uint8_t, 4> round1_output{};
+  crypto_generichash(round1_output.data(), round1_output.size(),
+                     round1_input.data(), round1_input.size(),
+                     obfuscation_key.data(), obfuscation_key.size());
+  std::uint32_t f1 = 0;
+  for (std::size_t i = 0; i < 4; ++i) {
+    f1 = (f1 << 8) | round1_output[i];
+  }
+  left ^= f1;
+
+  // Round 2
+  std::array<std::uint8_t, 4 + 1> round2_input{};
+  round2_input[0] = 2;
+  for (std::size_t i = 0; i < 4; ++i) {
+    round2_input[1 + i] = static_cast<std::uint8_t>((left >> (8 * (3 - i))) & 0xFF);
+  }
+  std::array<std::uint8_t, 4> round2_output{};
+  crypto_generichash(round2_output.data(), round2_output.size(),
+                     round2_input.data(), round2_input.size(),
+                     obfuscation_key.data(), obfuscation_key.size());
+  std::uint32_t f2 = 0;
+  for (std::size_t i = 0; i < 4; ++i) {
+    f2 = (f2 << 8) | round2_output[i];
+  }
+  right ^= f2;
+
+  // Round 3
+  std::array<std::uint8_t, 4 + 1> round3_input{};
+  round3_input[0] = 3;
+  for (std::size_t i = 0; i < 4; ++i) {
+    round3_input[1 + i] = static_cast<std::uint8_t>((right >> (8 * (3 - i))) & 0xFF);
+  }
+  std::array<std::uint8_t, 4> round3_output{};
+  crypto_generichash(round3_output.data(), round3_output.size(),
+                     round3_input.data(), round3_input.size(),
+                     obfuscation_key.data(), obfuscation_key.size());
+  std::uint32_t f3 = 0;
+  for (std::size_t i = 0; i < 4; ++i) {
+    f3 = (f3 << 8) | round3_output[i];
+  }
+  left ^= f3;
+
+  // Combine halves
+  return (static_cast<std::uint64_t>(left) << 32) | right;
+}
+
+std::uint64_t deobfuscate_sequence(std::uint64_t obfuscated_sequence,
+                                    std::span<const std::uint8_t, kAeadKeyLen> obfuscation_key) {
+  ensure_sodium_ready();
+
+  // Inverse Feistel network - apply rounds in reverse order
+  std::uint32_t left = static_cast<std::uint32_t>(obfuscated_sequence >> 32);
+  std::uint32_t right = static_cast<std::uint32_t>(obfuscated_sequence & 0xFFFFFFFF);
+
+  // Inverse Round 3
+  std::array<std::uint8_t, 4 + 1> round3_input{};
+  round3_input[0] = 3;
+  for (std::size_t i = 0; i < 4; ++i) {
+    round3_input[1 + i] = static_cast<std::uint8_t>((right >> (8 * (3 - i))) & 0xFF);
+  }
+  std::array<std::uint8_t, 4> round3_output{};
+  crypto_generichash(round3_output.data(), round3_output.size(),
+                     round3_input.data(), round3_input.size(),
+                     obfuscation_key.data(), obfuscation_key.size());
+  std::uint32_t f3 = 0;
+  for (std::size_t i = 0; i < 4; ++i) {
+    f3 = (f3 << 8) | round3_output[i];
+  }
+  left ^= f3;
+
+  // Inverse Round 2
+  std::array<std::uint8_t, 4 + 1> round2_input{};
+  round2_input[0] = 2;
+  for (std::size_t i = 0; i < 4; ++i) {
+    round2_input[1 + i] = static_cast<std::uint8_t>((left >> (8 * (3 - i))) & 0xFF);
+  }
+  std::array<std::uint8_t, 4> round2_output{};
+  crypto_generichash(round2_output.data(), round2_output.size(),
+                     round2_input.data(), round2_input.size(),
+                     obfuscation_key.data(), obfuscation_key.size());
+  std::uint32_t f2 = 0;
+  for (std::size_t i = 0; i < 4; ++i) {
+    f2 = (f2 << 8) | round2_output[i];
+  }
+  right ^= f2;
+
+  // Inverse Round 1
+  std::array<std::uint8_t, 4 + 1> round1_input{};
+  round1_input[0] = 1;
+  for (std::size_t i = 0; i < 4; ++i) {
+    round1_input[1 + i] = static_cast<std::uint8_t>((right >> (8 * (3 - i))) & 0xFF);
+  }
+  std::array<std::uint8_t, 4> round1_output{};
+  crypto_generichash(round1_output.data(), round1_output.size(),
+                     round1_input.data(), round1_input.size(),
+                     obfuscation_key.data(), obfuscation_key.size());
+  std::uint32_t f1 = 0;
+  for (std::size_t i = 0; i < 4; ++i) {
+    f1 = (f1 << 8) | round1_output[i];
+  }
+  left ^= f1;
+
+  // Combine halves
+  return (static_cast<std::uint64_t>(left) << 32) | right;
 }
 
 std::vector<std::uint8_t> aead_encrypt(std::span<const std::uint8_t, kAeadKeyLen> key,
